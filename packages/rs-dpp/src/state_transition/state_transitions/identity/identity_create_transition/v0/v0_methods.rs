@@ -42,7 +42,7 @@ impl IdentityCreateTransitionMethodsV0 for IdentityCreateTransitionV0 {
         signer: &S,
         bls: &impl BlsModule,
         user_fee_increase: UserFeeIncrease,
-        _platform_version: &PlatformVersion,
+        platform_version: &PlatformVersion,
     ) -> Result<StateTransition, ProtocolError> {
         let mut identity_create_transition = IdentityCreateTransitionV0 {
             user_fee_increase,
@@ -61,7 +61,7 @@ impl IdentityCreateTransitionMethodsV0 for IdentityCreateTransitionV0 {
             IdentityPublicKeyInCreation::validate_identity_public_keys_structure(
                 &public_keys,
                 true, // in create_identity context
-                _platform_version,
+                platform_version,
             )?;
         if !validation_result.is_valid() {
             let first_error = validation_result.errors.into_iter().next().unwrap();
