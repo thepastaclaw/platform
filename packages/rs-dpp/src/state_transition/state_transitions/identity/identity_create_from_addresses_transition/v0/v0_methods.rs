@@ -20,6 +20,8 @@ use crate::state_transition::StateTransitionType;
 // Crate: Feature-Gated (state-transition-signing)
 // ============================
 #[cfg(feature = "state-transition-signing")]
+use crate::state_transition::StateTransitionStructureValidation;
+#[cfg(feature = "state-transition-signing")]
 use crate::{
     address_funds::AddressFundsFeeStrategy,
     identity::{
@@ -104,6 +106,14 @@ impl IdentityCreateFromAddressesTransitionMethodsV0 for IdentityCreateFromAddres
             .keys()
             .map(|address| address_signer.sign_create_witness(address, &signable_bytes))
             .collect::<Result<Vec<_>, ProtocolError>>()?;
+
+        // Validate the fully-constructed transition structure
+        let validation_result =
+            identity_create_from_addresses_transition.validate_structure(platform_version);
+        if !validation_result.is_valid() {
+            let first_error = validation_result.errors.into_iter().next().unwrap();
+            return Err(ProtocolError::ConsensusError(Box::new(first_error)));
+        }
 
         Ok(identity_create_from_addresses_transition.into())
     }
