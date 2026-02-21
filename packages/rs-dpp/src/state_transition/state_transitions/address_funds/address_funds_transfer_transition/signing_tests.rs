@@ -17,7 +17,7 @@ use dashcore::secp256k1::{PublicKey as RawPublicKey, Secp256k1, SecretKey as Raw
 use dashcore::PublicKey;
 use platform_value::BinaryData;
 
-use crate::address_funds::{AddressWitness, PlatformAddress};
+use crate::address_funds::{AddressFundsFeeStrategyStep, AddressWitness, PlatformAddress};
 use crate::identity::signer::Signer;
 use crate::serialization::{PlatformDeserializable, PlatformSerializable, Signable};
 use crate::state_transition::address_funds_transfer_transition::methods::AddressFundsTransferTransitionMethodsV0;
@@ -267,16 +267,16 @@ fn test_single_p2pkh_input_signing() {
 
     // Build inputs and outputs
     let mut inputs = BTreeMap::new();
-    inputs.insert(input_address.clone(), (1u32, 1000u64)); // nonce: 1, credits: 1000
+    inputs.insert(input_address.clone(), (1u32, 1_000_000u64)); // nonce: 1, credits: 1000
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output_address, 900u64);
+    outputs.insert(output_address, 1_000_000u64);
 
     // Create signed transition
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -315,18 +315,18 @@ fn test_multiple_p2pkh_inputs_signing() {
 
     // Build inputs (multiple inputs)
     let mut inputs = BTreeMap::new();
-    inputs.insert(input1.clone(), (1u32, 500u64));
-    inputs.insert(input2.clone(), (1u32, 300u64));
-    inputs.insert(input3.clone(), (1u32, 200u64));
+    inputs.insert(input1.clone(), (1u32, 1_000_000u64));
+    inputs.insert(input2.clone(), (1u32, 1_000_000u64));
+    inputs.insert(input3.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 3_000_000u64);
 
     // Create signed transition
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -367,16 +367,16 @@ fn test_single_p2sh_2_of_3_multisig_input_signing() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input_address.clone(), (1u32, 1000u64));
+    inputs.insert(input_address.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     // Create signed transition
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -420,15 +420,15 @@ fn test_p2sh_3_of_5_multisig_input_signing() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input_address.clone(), (1u32, 5000u64));
+    inputs.insert(input_address.clone(), (1u32, 5_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 4500u64);
+    outputs.insert(output, 5_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -463,16 +463,16 @@ fn test_multiple_p2sh_inputs_signing() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input1.clone(), (1u32, 1000u64));
-    inputs.insert(input2.clone(), (1u32, 500u64));
+    inputs.insert(input1.clone(), (1u32, 1_000_000u64));
+    inputs.insert(input2.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 1400u64);
+    outputs.insert(output, 2_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -510,16 +510,16 @@ fn test_mixed_p2pkh_and_p2sh_inputs() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(p2pkh_input.clone(), (1u32, 1000u64));
-    inputs.insert(p2sh_input.clone(), (1u32, 2000u64));
+    inputs.insert(p2pkh_input.clone(), (1u32, 1_000_000u64));
+    inputs.insert(p2sh_input.clone(), (1u32, 2_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 2800u64);
+    outputs.insert(output, 3_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -568,19 +568,19 @@ fn test_complex_mixed_inputs_multiple_outputs() {
     let output2 = PlatformAddress::P2sh([101u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(p2pkh1.clone(), (1u32, 1000u64));
-    inputs.insert(p2pkh2.clone(), (1u32, 2000u64));
-    inputs.insert(p2sh1.clone(), (1u32, 3000u64));
-    inputs.insert(p2sh2.clone(), (1u32, 4000u64));
+    inputs.insert(p2pkh1.clone(), (1u32, 1_000_000u64));
+    inputs.insert(p2pkh2.clone(), (1u32, 2_000_000u64));
+    inputs.insert(p2sh1.clone(), (1u32, 3_000_000u64));
+    inputs.insert(p2sh2.clone(), (1u32, 4_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output1, 5000u64);
-    outputs.insert(output2, 4500u64);
+    outputs.insert(output1, 5_000_000u64);
+    outputs.insert(output2, 5_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -626,15 +626,15 @@ fn test_signed_transition_serialization_roundtrip() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -671,15 +671,15 @@ fn test_multisig_transition_serialization_roundtrip() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -712,16 +712,16 @@ fn test_mixed_transition_serialization_roundtrip() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(p2pkh.clone(), (1u32, 1000u64));
-    inputs.insert(p2sh.clone(), (1u32, 2000u64));
+    inputs.insert(p2pkh.clone(), (1u32, 1_000_000u64));
+    inputs.insert(p2sh.clone(), (1u32, 2_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 2800u64);
+    outputs.insert(output, 3_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -757,15 +757,15 @@ fn test_tampered_inputs_verification_fails() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output.clone(), 900u64);
+    outputs.insert(output.clone(), 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs.clone(),
         outputs.clone(),
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -781,7 +781,9 @@ fn test_tampered_inputs_verification_fails() {
 
     // Tamper with the transition by modifying credits
     let original_witnesses = transition.input_witnesses.clone();
-    transition.inputs.insert(input.clone(), (1u32, 2000u64)); // Changed credits
+    transition
+        .inputs
+        .insert(input.clone(), (1u32, 2_000_000u64)); // Changed credits
 
     // Re-add original witnesses (they were signed for different data)
     transition.input_witnesses = original_witnesses;
@@ -802,15 +804,15 @@ fn test_tampered_outputs_verification_fails() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output.clone(), 900u64);
+    outputs.insert(output.clone(), 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -825,7 +827,7 @@ fn test_tampered_outputs_verification_fails() {
     };
 
     // Tamper with outputs
-    transition.outputs.insert(output.clone(), 950u64); // Changed output amount
+    transition.outputs.insert(output.clone(), 950_000u64); // Changed output amount
 
     // Verification should fail
     let result = verify_transition_signatures(&transition);
@@ -844,15 +846,15 @@ fn test_wrong_witness_for_address_fails() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input1.clone(), (1u32, 1000u64));
+    inputs.insert(input1.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs.clone(),
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -868,7 +870,9 @@ fn test_wrong_witness_for_address_fails() {
 
     // Replace input with a different address but keep the same witness
     transition.inputs.clear();
-    transition.inputs.insert(input2.clone(), (1u32, 1000u64));
+    transition
+        .inputs
+        .insert(input2.clone(), (1u32, 1_000_000u64));
 
     // Verification should fail (witness public key doesn't match new address)
     let result = verify_transition_signatures(&transition);
@@ -886,15 +890,15 @@ fn test_missing_witness_fails() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -927,15 +931,15 @@ fn test_p2sh_insufficient_signatures_fails() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -983,15 +987,15 @@ fn test_1_of_1_multisig() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -1022,15 +1026,15 @@ fn test_high_threshold_multisig() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 10000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 9500u64);
+    outputs.insert(output, 1_000_000u64);
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -1059,16 +1063,16 @@ fn test_signer_cannot_sign_unknown_address() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(unknown_address.clone(), (1u32, 1000u64));
+    inputs.insert(unknown_address.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     // Should fail because signer doesn't have the key
     let result = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         0,
         get_platform_version(),
@@ -1099,17 +1103,17 @@ fn test_user_fee_increase_preserved() {
     let output = PlatformAddress::P2pkh([99u8; 20]);
 
     let mut inputs = BTreeMap::new();
-    inputs.insert(input.clone(), (1u32, 1000u64));
+    inputs.insert(input.clone(), (1u32, 1_000_000u64));
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(output, 900u64);
+    outputs.insert(output, 1_000_000u64);
 
     let user_fee_increase = 50u16;
 
     let state_transition = AddressFundsTransferTransitionV0::try_from_inputs_with_signer(
         inputs,
         outputs,
-        vec![],
+        vec![AddressFundsFeeStrategyStep::ReduceOutput(0)],
         &signer,
         user_fee_increase,
         get_platform_version(),
