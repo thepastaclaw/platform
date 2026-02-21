@@ -59,16 +59,16 @@ pub struct AddressProviderVTable {
     /// Called when an address is proven absent
     pub on_address_absent: OnAddressAbsentFn,
 
-    /// Check if there are still pending addresses
-    /// If null, the default implementation (pending_addresses is non-empty) is used
-    pub has_pending: Option<HasPendingFn>,
+    /// Check if there are still pending addresses (nullable function pointer)
+    /// If null, the default implementation (pending_addresses is non-empty) is used.
+    pub has_pending: *const c_void,
 
-    /// Get the highest found index
-    /// If null, returns None
-    pub highest_found_index: Option<GetHighestFoundIndexFn>,
+    /// Get the highest found index (nullable function pointer)
+    /// If null, returns None.
+    pub highest_found_index: *const c_void,
 
-    /// Optional destructor for cleanup
-    pub destroy: Option<DestroyProviderFn>,
+    /// Optional destructor for cleanup (nullable function pointer)
+    pub destroy: *const c_void,
 }
 
 /// FFI-compatible address provider using callbacks
@@ -151,7 +151,8 @@ impl<'a> AddressProvider for CallbackAddressProvider<'a> {
     fn has_pending(&self) -> bool {
         unsafe {
             let vtable = &*self.ffi.vtable;
-            if let Some(has_pending) = vtable.has_pending {
+            if !vtable.has_pending.is_null() {
+                let has_pending: HasPendingFn = std::mem::transmute(vtable.has_pending);
                 has_pending(self.ffi.context)
             } else {
                 // Default implementation
@@ -163,7 +164,9 @@ impl<'a> AddressProvider for CallbackAddressProvider<'a> {
     fn highest_found_index(&self) -> Option<AddressIndex> {
         unsafe {
             let vtable = &*self.ffi.vtable;
-            if let Some(get_highest) = vtable.highest_found_index {
+            if !vtable.highest_found_index.is_null() {
+                let get_highest: GetHighestFoundIndexFn =
+                    std::mem::transmute(vtable.highest_found_index);
                 let index = get_highest(self.ffi.context);
                 if index == u32::MAX {
                     None
@@ -240,9 +243,9 @@ mod tests {
         pending_addresses: test_pending_addresses,
         on_address_found: test_on_found,
         on_address_absent: test_on_absent,
-        has_pending: None,
-        highest_found_index: None,
-        destroy: None,
+        has_pending: std::ptr::null(),
+        highest_found_index: std::ptr::null(),
+        destroy: std::ptr::null(),
     };
 
     #[test]

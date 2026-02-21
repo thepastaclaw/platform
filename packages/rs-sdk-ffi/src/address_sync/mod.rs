@@ -309,7 +309,8 @@ pub unsafe extern "C" fn dash_sdk_address_provider_free(provider: *mut AddressPr
     // Call the destroy callback if provided
     if !provider.vtable.is_null() {
         let vtable = &*provider.vtable;
-        if let Some(destroy) = vtable.destroy {
+        if !vtable.destroy.is_null() {
+            let destroy: DestroyProviderFn = std::mem::transmute(vtable.destroy);
             destroy(provider.context);
         }
     }
