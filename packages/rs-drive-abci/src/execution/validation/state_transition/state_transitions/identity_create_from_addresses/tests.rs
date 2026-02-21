@@ -488,14 +488,17 @@ mod tests {
             let (identity, identity_signer) =
                 create_identity_with_keys([50u8; 32], &mut rng, platform_version);
 
-            // Create signed transition with too many inputs
-            let transition = create_signed_identity_create_from_addresses_transition(
+            // Create signed transition with too many inputs (manual construction bypasses
+            // constructor-time structure validation so check_tx can assert the intended error).
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -641,14 +644,16 @@ mod tests {
             let (identity, identity_signer) =
                 create_identity_with_keys([50u8; 32], &mut rng, platform_version);
 
-            // Create signed transition with input below minimum
-            let transition = create_signed_identity_create_from_addresses_transition(
+            // Manual construction keeps this test focused on check_tx validation behavior.
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -1005,13 +1010,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, input_amount));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -1292,13 +1299,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, input_amount));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -1410,13 +1419,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, input_amount));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -1507,13 +1518,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, input_amount));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -1622,13 +1635,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, dash_to_credits!(1.0)));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -1697,13 +1712,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, dash_to_credits!(1.0)));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -1774,13 +1791,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, input_amount)); // Wrong nonce
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -2263,13 +2282,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, input_amount));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -2379,13 +2400,15 @@ mod tests {
             inputs.insert(address, (1 as AddressNonce, input_amount));
 
             // Create signed transition
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -2910,13 +2933,15 @@ mod tests {
                 (1 as AddressNonce, i64::MAX as u64 / 2 - 200_000_000),
             );
 
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -3100,13 +3125,15 @@ mod tests {
             let mut inputs = BTreeMap::new();
             inputs.insert(address, (1 as AddressNonce, min_input));
 
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 
@@ -3311,13 +3338,15 @@ mod tests {
             let mut inputs = BTreeMap::new();
             inputs.insert(address, (1 as AddressNonce, min_input - 1)); // One below minimum
 
-            let transition = create_signed_identity_create_from_addresses_transition(
+            let transition = create_signed_identity_create_from_addresses_transition_full(
                 &identity,
                 &address_signer,
                 &identity_signer,
                 inputs,
                 None,
-                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
                 platform_version,
             );
 

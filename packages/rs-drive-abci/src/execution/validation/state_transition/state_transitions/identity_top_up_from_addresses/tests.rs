@@ -292,7 +292,17 @@ mod tests {
                 inputs.insert(addr, (1 as AddressNonce, dash_to_credits!(0.01)));
             }
 
-            let transition = create_signed_transition(&identity, &signer, inputs, platform_version);
+            let transition = create_signed_transition_with_options(
+                &identity,
+                &signer,
+                inputs,
+                None,
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                0,
+                platform_version,
+            );
 
             let result = transition.serialize_to_bytes();
             assert!(result.is_ok());

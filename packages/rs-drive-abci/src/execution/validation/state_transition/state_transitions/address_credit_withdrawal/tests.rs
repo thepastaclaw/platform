@@ -21,7 +21,7 @@ mod tests {
     use dpp::identity::signer::Signer;
     use dpp::platform_value::BinaryData;
     use dpp::prelude::AddressNonce;
-    use dpp::serialization::{PlatformDeserializable, PlatformSerializable};
+    use dpp::serialization::{PlatformDeserializable, PlatformSerializable, Signable};
     use dpp::state_transition::address_credit_withdrawal_transition::methods::AddressCreditWithdrawalTransitionMethodsV0;
     use dpp::state_transition::address_credit_withdrawal_transition::v0::AddressCreditWithdrawalTransitionV0;
     use dpp::state_transition::address_credit_withdrawal_transition::AddressCreditWithdrawalTransition;
@@ -168,6 +168,44 @@ mod tests {
             PlatformVersion::latest(),
         )
         .expect("should create signed transition")
+    }
+
+    /// Create a signed withdrawal transition without running constructor-time structure checks.
+    fn create_manually_signed_withdrawal_transition(
+        signer: &TestAddressSigner,
+        inputs: BTreeMap<PlatformAddress, (AddressNonce, u64)>,
+        output: Option<(PlatformAddress, u64)>,
+        fee_strategy: AddressFundsFeeStrategy,
+        core_fee_per_byte: u32,
+        pooling: Pooling,
+        output_script: CoreScript,
+        user_fee_increase: u16,
+    ) -> StateTransition {
+        let mut transition = AddressCreditWithdrawalTransitionV0 {
+            inputs: inputs.clone(),
+            output,
+            fee_strategy,
+            core_fee_per_byte,
+            pooling,
+            output_script,
+            user_fee_increase,
+            input_witnesses: vec![],
+        };
+
+        let signable_bytes = StateTransition::from(transition.clone())
+            .signable_bytes()
+            .expect("should get signable bytes");
+
+        transition.input_witnesses = inputs
+            .keys()
+            .map(|address| {
+                signer
+                    .sign_create_witness(address, &signable_bytes)
+                    .expect("should create witness")
+            })
+            .collect();
+
+        AddressCreditWithdrawalTransition::V0(transition).into()
     }
 
     // ==========================================
@@ -1099,12 +1137,17 @@ mod tests {
             inputs.insert(input_address2, (1 as AddressNonce, dash_to_credits!(0.5)));
             inputs.insert(input_address3, (1 as AddressNonce, dash_to_credits!(0.5)));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 None,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -1316,12 +1359,17 @@ mod tests {
             let mut inputs = BTreeMap::new();
             inputs.insert(input_address, (1 as AddressNonce, withdrawal_amount));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 None,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -1420,12 +1468,17 @@ mod tests {
 
             let output = Some((output_address, output_amount));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 output,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -1502,12 +1555,17 @@ mod tests {
             inputs.insert(input_address1, (1 as AddressNonce, dash_to_credits!(0.3)));
             inputs.insert(input_address2, (1 as AddressNonce, dash_to_credits!(0.3)));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 None,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -1604,12 +1662,17 @@ mod tests {
             let mut inputs = BTreeMap::new();
             inputs.insert(input_address, (1 as AddressNonce, dash_to_credits!(0.5)));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 None,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -3414,20 +3477,18 @@ mod tests {
             inputs.insert(input_address, (1 as AddressNonce, dash_to_credits!(0.5)));
 
             // Use Pooling::IfAvailable
-            let transition = AddressCreditWithdrawalTransitionV0::try_from_inputs_with_signer(
+            let transition = create_manually_signed_withdrawal_transition(
+                &signer,
                 inputs,
                 None,
                 AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
                     0,
                 )]),
                 1,
-                Pooling::IfAvailable, // Different pooling mode
+                Pooling::IfAvailable,
                 create_random_output_script(&mut rng),
-                &signer,
                 0,
-                platform_version,
-            )
-            .expect("should create signed transition");
+            );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
 
@@ -3473,20 +3534,18 @@ mod tests {
             inputs.insert(input_address, (1 as AddressNonce, dash_to_credits!(0.5)));
 
             // Use Pooling::Standard
-            let transition = AddressCreditWithdrawalTransitionV0::try_from_inputs_with_signer(
+            let transition = create_manually_signed_withdrawal_transition(
+                &signer,
                 inputs,
                 None,
                 AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
                     0,
                 )]),
                 1,
-                Pooling::Standard, // Standard pooling
+                Pooling::Standard,
                 create_random_output_script(&mut rng),
-                &signer,
                 0,
-                platform_version,
-            )
-            .expect("should create signed transition");
+            );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
 
@@ -3670,12 +3729,17 @@ mod tests {
             let mut inputs = BTreeMap::new();
             inputs.insert(input_address, (1 as AddressNonce, withdrawal_amount));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 None,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -4744,12 +4808,17 @@ mod tests {
             // Try to withdraw the tiny amount
             inputs.insert(input_address, (1 as AddressNonce, 5000));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 None,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -5100,12 +5169,17 @@ mod tests {
             // Change output goes back to the same address (should fail)
             let output = Some((input_address, dash_to_credits!(0.5)));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 output,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -5150,12 +5224,17 @@ mod tests {
             // Change output goes to a different address
             let output = Some((change_address, dash_to_credits!(0.5)));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 output,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -5197,12 +5276,17 @@ mod tests {
             // Zero credits change output
             let output = Some((input_address, 0));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 output,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -5244,12 +5328,17 @@ mod tests {
             // Change output exceeds remaining (after withdrawal + fees)
             let output = Some((input_address, dash_to_credits!(2.0)));
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 output,
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -5582,7 +5671,8 @@ mod tests {
             output_script: CoreScript,
             core_fee_per_byte: u32,
         ) -> StateTransition {
-            AddressCreditWithdrawalTransitionV0::try_from_inputs_with_signer(
+            create_manually_signed_withdrawal_transition(
+                signer,
                 inputs,
                 None,
                 AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
@@ -5591,11 +5681,8 @@ mod tests {
                 core_fee_per_byte,
                 Pooling::Never,
                 output_script,
-                signer,
                 0,
-                PlatformVersion::latest(),
             )
-            .expect("should create signed transition")
         }
 
         #[test]
@@ -5923,12 +6010,17 @@ mod tests {
             // withdrawal_amount = 0.01 - 0.5 = UNDERFLOW
             let output_address = create_platform_address(2);
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 Some((output_address, dash_to_credits!(0.5))),
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
@@ -6176,12 +6268,17 @@ mod tests {
 
             let output_address = create_platform_address(2);
 
-            let transition = create_signed_address_credit_withdrawal_transition(
+            let transition = create_manually_signed_withdrawal_transition(
                 &signer,
                 inputs,
                 Some((output_address, output_amount)),
-                vec![AddressFundsFeeStrategyStep::DeductFromInput(0)],
+                AddressFundsFeeStrategy::from(vec![AddressFundsFeeStrategyStep::DeductFromInput(
+                    0,
+                )]),
+                1,
+                Pooling::Never,
                 create_random_output_script(&mut rng),
+                0,
             );
 
             let result = transition.serialize_to_bytes().expect("should serialize");
