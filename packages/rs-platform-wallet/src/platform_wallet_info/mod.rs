@@ -199,9 +199,17 @@ pub(super) fn parse_contact_request_document(
             )
         })?;
 
-    let created_at_core_block_height = doc.created_at_core_block_height().unwrap_or(0);
+    let created_at_core_block_height = doc.created_at_core_block_height().ok_or_else(|| {
+        PlatformWalletError::InvalidIdentityData(
+            "Missing created_at_core_block_height in contact request".to_string(),
+        )
+    })?;
 
-    let created_at = doc.created_at().unwrap_or(0);
+    let created_at = doc.created_at().ok_or_else(|| {
+        PlatformWalletError::InvalidIdentityData(
+            "Missing created_at in contact request".to_string(),
+        )
+    })?;
 
     let sender_id = doc.owner_id();
 

@@ -65,15 +65,10 @@ impl PlatformWalletInfo {
                     let identity_id = identity.id();
 
                     // Add to manager if not already present
-                    if !self
-                        .identity_manager()
-                        .identities()
-                        .contains_key(&identity_id)
-                    {
+                    if self.identity_manager().identity(&identity_id).is_none() {
                         self.identity_manager_mut().add_identity(identity)?;
+                        discovered.push(identity_id);
                     }
-
-                    discovered.push(identity_id);
                     consecutive_misses = 0;
                 }
                 Ok(None) => {
@@ -85,7 +80,8 @@ impl PlatformWalletInfo {
                         "Failed to query identity by public key hash: {}",
                         e
                     );
-                    consecutive_misses += 1;
+                    // Don't increment consecutive_misses: a query failure is not
+                    // a confirmed empty slot and should not consume the gap budget.
                 }
             }
 
