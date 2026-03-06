@@ -37,7 +37,7 @@ impl WalletTransactionChecker for PlatformWalletInfo {
                         .fetch_identity_and_contacts_for_asset_lock(wallet, tx)
                         .await
                     {
-                        eprintln!("Failed to fetch identity for asset lock: {}", e);
+                        tracing::warn!("Failed to fetch identity for asset lock: {}", e);
                     }
                 }
             }

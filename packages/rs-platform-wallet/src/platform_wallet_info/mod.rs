@@ -15,6 +15,9 @@ mod matured_transactions;
 mod wallet_info_interface;
 mod wallet_transaction_checker;
 
+/// Default maximum number of contact request documents to fetch per identity.
+const DEFAULT_CONTACT_REQUEST_LIMIT: u32 = 100;
+
 /// Platform wallet information that extends ManagedWalletInfo with identity support
 #[derive(Clone)]
 pub struct PlatformWalletInfo {
@@ -51,6 +54,77 @@ impl fmt::Debug for PlatformWalletInfo {
             .field("wallet_info", &self.wallet_info)
             .field("identity_manager", &self.identity_manager)
             .finish()
+    }
+}
+
+impl PlatformWalletInfo {
+    /// Fetch and store DashPay contact requests for a single identity.
+    ///
+    /// Queries Platform for sent and received contact request documents,
+    /// parses them, and stores them on the corresponding managed identity.
+    pub(super) async fn fetch_and_store_contact_requests(
+        &mut self,
+        sdk: &dash_sdk::Sdk,
+        identity: &dpp::identity::Identity,
+        identity_id: &Identifier,
+    ) -> Result<(), PlatformWalletError> {
+        let (sent_docs, received_docs) = sdk
+            .fetch_all_contact_requests_for_identity(identity, Some(DEFAULT_CONTACT_REQUEST_LIMIT))
+            .await
+            .map_err(|e| {
+                PlatformWalletError::InvalidIdentityData(format!(
+                    "Failed to fetch contact requests for identity {}: {}",
+                    identity_id, e
+                ))
+            })?;
+
+        // Process sent contact requests
+        for (_doc_id, maybe_doc) in sent_docs {
+            if let Some(doc) = maybe_doc {
+                match parse_contact_request_document(&doc) {
+                    Ok(contact_request) => {
+                        if let Some(managed_identity) = self
+                            .identity_manager_mut()
+                            .managed_identity_mut(identity_id)
+                        {
+                            managed_identity.add_sent_contact_request(contact_request);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            identity_id = %identity_id,
+                            "Failed to parse sent contact request document: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Process received contact requests
+        for (_doc_id, maybe_doc) in received_docs {
+            if let Some(doc) = maybe_doc {
+                match parse_contact_request_document(&doc) {
+                    Ok(contact_request) => {
+                        if let Some(managed_identity) = self
+                            .identity_manager_mut()
+                            .managed_identity_mut(identity_id)
+                        {
+                            managed_identity.add_incoming_contact_request(contact_request);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            identity_id = %identity_id,
+                            "Failed to parse received contact request document: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

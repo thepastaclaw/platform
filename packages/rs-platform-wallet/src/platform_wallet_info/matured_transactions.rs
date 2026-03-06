@@ -4,7 +4,6 @@
 //! asset lock transactions.
 
 use super::key_derivation::derive_identity_auth_key_hash;
-use super::parse_contact_request_document;
 use super::PlatformWalletInfo;
 use crate::error::PlatformWalletError;
 use dpp::identity::accessors::IdentityGettersV0;
@@ -81,8 +80,7 @@ impl PlatformWalletInfo {
             .clone();
 
         // Derive the first authentication key hash (identity_index 0, key_index 0)
-        let key_hash_array =
-            derive_identity_auth_key_hash(wallet, self.network(), 0, 0)?;
+        let key_hash_array = derive_identity_auth_key_hash(wallet, self.network(), 0, 0)?;
 
         // Query Platform for identity by public key hash
         match dpp::identity::Identity::fetch(&sdk, PublicKeyHash(key_hash_array)).await {
@@ -99,57 +97,24 @@ impl PlatformWalletInfo {
                 }
 
                 // Fetch DashPay contact requests for this identity
-                match sdk
-                    .fetch_all_contact_requests_for_identity(&identity, Some(100))
+                if let Err(e) = self
+                    .fetch_and_store_contact_requests(&sdk, &identity, &identity_id)
                     .await
                 {
-                    Ok((sent_docs, received_docs)) => {
-                        // Process sent contact requests
-                        for (_doc_id, maybe_doc) in sent_docs {
-                            if let Some(doc) = maybe_doc {
-                                if let Ok(contact_request) = parse_contact_request_document(&doc) {
-                                    // Add to managed identity
-                                    if let Some(managed_identity) = self
-                                        .identity_manager_mut()
-                                        .managed_identity_mut(&identity_id)
-                                    {
-                                        managed_identity.add_sent_contact_request(contact_request);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Process received contact requests
-                        for (_doc_id, maybe_doc) in received_docs {
-                            if let Some(doc) = maybe_doc {
-                                if let Ok(contact_request) = parse_contact_request_document(&doc) {
-                                    // Add to managed identity
-                                    if let Some(managed_identity) = self
-                                        .identity_manager_mut()
-                                        .managed_identity_mut(&identity_id)
-                                    {
-                                        managed_identity
-                                            .add_incoming_contact_request(contact_request);
-                                    }
-                                }
-                            }
-                        }
-
-                        identities_processed.push(identity_id);
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Failed to fetch contact requests for identity {}: {}",
-                            identity_id, e
-                        );
-                    }
+                    tracing::warn!(
+                        %identity_id,
+                        "Failed to fetch contact requests after asset lock: {}",
+                        e
+                    );
+                } else {
+                    identities_processed.push(identity_id);
                 }
             }
             Ok(None) => {
                 // No identity found for this key - that's ok, may not be registered yet
             }
             Err(e) => {
-                eprintln!("Failed to query identity by public key hash: {}", e);
+                tracing::warn!("Failed to query identity by public key hash: {}", e);
             }
         }
 

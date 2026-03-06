@@ -5,7 +5,6 @@
 //! wallet's BIP32 tree and queries Platform to find registered identities.
 
 use super::key_derivation::derive_identity_auth_key_hash;
-use super::parse_contact_request_document;
 use super::PlatformWalletInfo;
 use crate::error::PlatformWalletError;
 use dpp::identity::accessors::IdentityGettersV0;
@@ -58,8 +57,7 @@ impl PlatformWalletInfo {
 
         while consecutive_misses < gap_limit {
             // Derive the authentication key hash for this identity index (key_index 0)
-            let key_hash_array =
-                derive_identity_auth_key_hash(wallet, network, identity_index, 0)?;
+            let key_hash_array = derive_identity_auth_key_hash(wallet, network, identity_index, 0)?;
 
             // Query Platform for an identity registered with this key hash
             match dpp::identity::Identity::fetch(&sdk, PublicKeyHash(key_hash_array)).await {
@@ -82,9 +80,10 @@ impl PlatformWalletInfo {
                     consecutive_misses += 1;
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Failed to query identity by public key hash at index {}: {}",
-                        identity_index, e
+                    tracing::warn!(
+                        identity_index,
+                        "Failed to query identity by public key hash: {}",
+                        e
                     );
                     consecutive_misses += 1;
                 }
@@ -142,45 +141,15 @@ impl PlatformWalletInfo {
                 None => continue,
             };
 
-            match sdk
-                .fetch_all_contact_requests_for_identity(&identity, Some(100))
+            if let Err(e) = self
+                .fetch_and_store_contact_requests(&sdk, &identity, identity_id)
                 .await
             {
-                Ok((sent_docs, received_docs)) => {
-                    // Process sent contact requests
-                    for (_doc_id, maybe_doc) in sent_docs {
-                        if let Some(doc) = maybe_doc {
-                            if let Ok(contact_request) = parse_contact_request_document(&doc) {
-                                if let Some(managed_identity) = self
-                                    .identity_manager_mut()
-                                    .managed_identity_mut(identity_id)
-                                {
-                                    managed_identity.add_sent_contact_request(contact_request);
-                                }
-                            }
-                        }
-                    }
-
-                    // Process received contact requests
-                    for (_doc_id, maybe_doc) in received_docs {
-                        if let Some(doc) = maybe_doc {
-                            if let Ok(contact_request) = parse_contact_request_document(&doc) {
-                                if let Some(managed_identity) = self
-                                    .identity_manager_mut()
-                                    .managed_identity_mut(identity_id)
-                                {
-                                    managed_identity.add_incoming_contact_request(contact_request);
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Failed to fetch contact requests for identity {}: {}",
-                        identity_id, e
-                    );
-                }
+                tracing::warn!(
+                    %identity_id,
+                    "Failed to fetch contact requests during discovery: {}",
+                    e
+                );
             }
         }
 
