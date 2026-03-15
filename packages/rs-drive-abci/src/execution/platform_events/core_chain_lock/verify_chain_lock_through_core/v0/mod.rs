@@ -44,12 +44,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::config::PlatformConfig;
-    use crate::platform_types::platform::Platform;
     use crate::rpc::core::{CoreRPCLike, MockCoreRPCLike};
     use dpp::dashcore::hashes::Hash;
     use dpp::dashcore::{BlockHash, ChainLock};
-    use dpp::version::PlatformVersion;
 
     fn make_chain_lock(height: u32) -> ChainLock {
         ChainLock {
@@ -59,31 +56,24 @@ mod tests {
         }
     }
 
+    /// Tests that MockCoreRPCLike::verify_chain_lock returns true when configured to do so.
+    /// Note: this validates mock wiring, not the production `verify_chain_lock_through_core_v0`
+    /// method. The mock cannot easily be injected into a constructed Platform instance.
     #[test]
-    fn test_verify_without_submit_delegates_to_verify_chain_lock() {
-        let platform_version = PlatformVersion::latest();
+    fn test_mock_verify_chain_lock_returns_true() {
         let mut mock_rpc = MockCoreRPCLike::new();
         mock_rpc.expect_verify_chain_lock().returning(|_| Ok(true));
 
         let chain_lock = make_chain_lock(100);
-
-        let tempdir = tempfile::TempDir::new().unwrap();
-        let platform = Platform::<MockCoreRPCLike>::open(
-            tempdir.path(),
-            None,
-            Some(platform_version.protocol_version),
-        )
-        .expect("should open platform");
-
-        // Replace the core_rpc - we can't easily do this with the builder pattern
-        // so we test the logic directly via the mock
         let result = mock_rpc.verify_chain_lock(&chain_lock);
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
 
+    /// Tests that MockCoreRPCLike::verify_chain_lock returns false for an invalid lock.
+    /// Note: this validates mock wiring, not the production method.
     #[test]
-    fn test_verify_without_submit_returns_false_for_invalid() {
+    fn test_mock_verify_chain_lock_returns_false() {
         let mut mock_rpc = MockCoreRPCLike::new();
         mock_rpc.expect_verify_chain_lock().returning(|_| Ok(false));
 
@@ -93,8 +83,10 @@ mod tests {
         assert!(!result.unwrap());
     }
 
+    /// Tests that MockCoreRPCLike::submit_chain_lock returns the same height when configured.
+    /// Note: this validates mock wiring, not the production method.
     #[test]
-    fn test_submit_chain_lock_returns_synced_when_best_height_matches() {
+    fn test_mock_submit_chain_lock_same_height_returns_synced() {
         let mut mock_rpc = MockCoreRPCLike::new();
         mock_rpc
             .expect_submit_chain_lock()
@@ -106,8 +98,10 @@ mod tests {
         assert!(best_height >= chain_lock.block_height);
     }
 
+    /// Tests that MockCoreRPCLike::submit_chain_lock returns a higher height.
+    /// Note: this validates mock wiring, not the production method.
     #[test]
-    fn test_submit_chain_lock_returns_higher_height() {
+    fn test_mock_submit_chain_lock_higher_height_returns_synced() {
         let mut mock_rpc = MockCoreRPCLike::new();
         mock_rpc.expect_submit_chain_lock().returning(|_| Ok(150));
 

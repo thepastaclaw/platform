@@ -264,9 +264,7 @@ mod tests {
         if let DecodedStateTransition::InvalidEncoding(ref inv) = decoded[0] {
             let is_size_error = matches!(
                 &inv.error,
-                ConsensusError::BasicError(
-                    BasicError::StateTransitionMaxSizeExceededError(_)
-                )
+                ConsensusError::BasicError(BasicError::StateTransitionMaxSizeExceededError(_))
             );
             assert!(
                 !is_size_error,

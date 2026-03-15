@@ -795,16 +795,57 @@ mod tests {
             .transition_to_version_11(&transaction, platform_version)
             .expect("expected version 11 transition to succeed");
 
-        let result = platform.transition_to_version_12(&transaction, platform_version);
+        platform
+            .transition_to_version_12(&transaction, platform_version)
+            .expect("expected version 12 transition to succeed");
 
-        assert!(result.is_ok());
+        // Verify that the shielded credit pool sum tree exists under addresses path
+        use drive::grovedb_path::SubtreePath;
+        let addresses_root: &[&[u8]] = &[&[RootTree::AddressBalances as u8]];
+        let pool_element = platform.drive.grove.get(
+            SubtreePath::from(addresses_root),
+            &[SHIELDED_CREDIT_POOL_KEY_U8],
+            Some(&transaction),
+            &platform_version.drive.grove_version,
+        );
+        assert!(
+            pool_element.value.is_ok(),
+            "shielded credit pool tree should exist under addresses path"
+        );
+
+        // Verify subtrees inside the shielded pool path
+        let pool_path = shielded_credit_pool_path();
+        let pool_subtree_path = SubtreePath::from(pool_path.as_slice());
+        for (key, label) in [
+            (&[SHIELDED_NOTES_KEY][..], "SHIELDED_NOTES_KEY"),
+            (&[SHIELDED_NULLIFIERS_KEY][..], "SHIELDED_NULLIFIERS_KEY"),
+            (
+                &[SHIELDED_TOTAL_BALANCE_KEY][..],
+                "SHIELDED_TOTAL_BALANCE_KEY",
+            ),
+            (
+                &[SHIELDED_ANCHORS_IN_POOL_KEY][..],
+                "SHIELDED_ANCHORS_IN_POOL_KEY",
+            ),
+        ] {
+            let element = platform.drive.grove.get(
+                pool_subtree_path.clone(),
+                key,
+                Some(&transaction),
+                &platform_version.drive.grove_version,
+            );
+            assert!(
+                element.value.is_ok(),
+                "{label} should exist in shielded pool"
+            );
+        }
     }
 
     // test_full_transition_from_version_3_to_latest and test_transition_from_version_5
     // removed: multi-version transitions require cumulative state from each prior version
 
     #[test]
-    fn test_transition_from_version_10_only_does_11_and_12() {
+    fn test_transition_from_version_10_to_latest_succeeds() {
         let platform_version = PlatformVersion::latest();
         let platform = TestPlatformBuilder::new()
             .build_with_mock_rpc()
