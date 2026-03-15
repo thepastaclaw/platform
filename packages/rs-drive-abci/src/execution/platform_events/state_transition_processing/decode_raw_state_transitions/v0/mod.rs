@@ -258,14 +258,20 @@ mod tests {
         let decoded: Vec<_> = container.into_iter().collect();
         assert_eq!(decoded.len(), 1);
 
-        // Should NOT be rejected as oversized - it should attempt to deserialize
-        // and fail with a decoding error since it's all zeros
-        match &decoded[0] {
-            DecodedStateTransition::InvalidEncoding(_) => {} // Deserialization error is fine
-            DecodedStateTransition::FailedToDecode(_) => {}  // Protocol error is fine
-            DecodedStateTransition::SuccessfullyDecoded(_) => {
-                panic!("zeros at max size should not decode successfully")
-            }
+        // Should NOT be rejected as oversized - it should attempt to deserialize.
+        // Any decode result (success, invalid encoding, or failed) is acceptable
+        // as long as it was not rejected by the size check.
+        if let DecodedStateTransition::InvalidEncoding(ref inv) = decoded[0] {
+            let is_size_error = matches!(
+                &inv.error,
+                ConsensusError::BasicError(
+                    BasicError::StateTransitionMaxSizeExceededError(_)
+                )
+            );
+            assert!(
+                !is_size_error,
+                "buffer at exactly max size should not be rejected as oversized"
+            );
         }
     }
 }
