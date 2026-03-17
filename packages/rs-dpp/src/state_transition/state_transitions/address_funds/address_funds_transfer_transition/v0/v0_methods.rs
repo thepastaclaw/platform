@@ -59,8 +59,7 @@ impl AddressFundsTransferTransitionMethodsV0 for AddressFundsTransferTransitionV
 
         // Validate the fully-constructed transition structure
         let validation_result = address_funds_transition.validate_structure(platform_version);
-        if !validation_result.is_valid() {
-            let first_error = validation_result.errors.into_iter().next().unwrap();
+        if let Some(first_error) = validation_result.errors.into_iter().next() {
             return Err(ProtocolError::ConsensusError(Box::new(first_error)));
         }
 

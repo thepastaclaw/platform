@@ -63,8 +63,7 @@ impl IdentityCreateTransitionMethodsV0 for IdentityCreateTransitionV0 {
                 true, // in create_identity context
                 platform_version,
             )?;
-        if !validation_result.is_valid() {
-            let first_error = validation_result.errors.into_iter().next().unwrap();
+        if let Some(first_error) = validation_result.errors.into_iter().next() {
             return Err(ProtocolError::ConsensusError(Box::new(first_error)));
         }
 

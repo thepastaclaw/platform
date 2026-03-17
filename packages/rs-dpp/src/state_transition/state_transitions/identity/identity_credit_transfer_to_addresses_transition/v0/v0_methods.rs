@@ -56,8 +56,7 @@ impl IdentityCreditTransferToAddressesTransitionMethodsV0
         // Validate structure before .into() conversion and signing, since this transition
         // uses sign_external on the StateTransition rather than setting witnesses on the V0 struct.
         let validation_result = transition_v0.validate_structure(platform_version);
-        if !validation_result.is_valid() {
-            let first_error = validation_result.errors.into_iter().next().unwrap();
+        if let Some(first_error) = validation_result.errors.into_iter().next() {
             return Err(ProtocolError::ConsensusError(Box::new(first_error)));
         }
 
