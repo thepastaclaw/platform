@@ -209,7 +209,7 @@ pub unsafe extern "C" fn dash_sdk_identity_withdraw(
 
         debug!("dash_sdk_identity_withdraw: calling SDK withdraw");
 
-        let new_balance = identity
+        let (new_balance, _state_transition_hash) = identity
             .withdraw(
                 &wrapper.sdk,
                 Some(withdraw_address),

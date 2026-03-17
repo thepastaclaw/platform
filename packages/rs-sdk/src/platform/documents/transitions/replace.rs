@@ -200,7 +200,7 @@ impl Sdk {
         replace_document_transition_builder: DocumentReplaceTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<DocumentReplaceResult, Error> {
+    ) -> Result<(DocumentReplaceResult, [u8; 32]), Error> {
         trace!(
             document_id = %replace_document_transition_builder.document.id(),
             document_revision = replace_document_transition_builder.document.revision().unwrap_or(0),
@@ -218,7 +218,7 @@ impl Sdk {
         trace!("document_replace: state transition signed");
 
         trace!("document_replace: broadcasting and awaiting response");
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
         trace!("document_replace: broadcast completed");
@@ -226,7 +226,10 @@ impl Sdk {
         match proof_result {
             StateTransitionProofResult::VerifiedDocuments(documents) => {
                 if let Some((_, Some(document))) = documents.into_iter().next() {
-                    Ok(DocumentReplaceResult::Document(document))
+                    Ok((
+                        DocumentReplaceResult::Document(document),
+                        state_transition_hash,
+                    ))
                 } else {
                     Err(Error::DriveProofError(
                         drive::error::proof::ProofError::UnexpectedResultProof(

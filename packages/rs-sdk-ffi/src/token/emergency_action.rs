@@ -175,7 +175,7 @@ pub unsafe extern "C" fn dash_sdk_token_emergency_action(
         }
 
         // Use SDK method to perform emergency action and wait
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .token_emergency_action(builder, identity_public_key, signer)
             .await

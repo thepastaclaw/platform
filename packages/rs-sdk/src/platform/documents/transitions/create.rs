@@ -205,7 +205,7 @@ impl Sdk {
         create_document_transition_builder: DocumentCreateTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<DocumentCreateResult, Error> {
+    ) -> Result<(DocumentCreateResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = create_document_transition_builder.settings;
@@ -219,14 +219,17 @@ impl Sdk {
         trace!(hex = %hex::encode(state_transition.serialize_to_bytes()?), "document_create: transition bytes");
         trace!(transition = ?state_transition, "document_create: transition details");
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedDocuments(documents) => {
                 if let Some((_, Some(document))) = documents.into_iter().next() {
-                    Ok(DocumentCreateResult::Document(document))
+                    Ok((
+                        DocumentCreateResult::Document(document),
+                        state_transition_hash,
+                    ))
                 } else {
                     Err(Error::DriveProofError(
                         drive::error::proof::ProofError::UnexpectedResultProof(

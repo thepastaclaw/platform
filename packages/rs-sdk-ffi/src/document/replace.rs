@@ -347,7 +347,7 @@ pub unsafe extern "C" fn dash_sdk_document_replace_on_platform_and_wait(
             identity_public_key.key_type()
         );
 
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .document_replace(builder, identity_public_key, signer)
             .await

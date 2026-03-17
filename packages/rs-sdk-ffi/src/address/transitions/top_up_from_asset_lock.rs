@@ -258,7 +258,7 @@ unsafe fn dash_sdk_address_top_up_from_asset_lock_inner(
     // Execute the top-up
     let result: Result<DashSDKAddressInfoMap, FFIError> = wrapper.runtime.block_on(async {
         // Use TopUpAddress trait - we need to call it on the output map
-        let address_infos = output_map
+        let (address_infos, _state_transition_hash) = output_map
             .top_up(
                 &wrapper.sdk,
                 asset_lock_proof,

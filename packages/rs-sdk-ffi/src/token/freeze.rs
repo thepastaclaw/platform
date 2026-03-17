@@ -177,7 +177,7 @@ pub unsafe extern "C" fn dash_sdk_token_freeze(
         }
 
         // Use SDK method to freeze and wait
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .token_freeze(builder, identity_public_key, signer)
             .await

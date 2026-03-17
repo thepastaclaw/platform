@@ -249,7 +249,7 @@ impl Sdk {
         set_price_document_transition_builder: DocumentSetPriceTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<DocumentSetPriceResult, Error> {
+    ) -> Result<(DocumentSetPriceResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = set_price_document_transition_builder.settings;
@@ -258,14 +258,17 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedDocuments(documents) => {
                 if let Some((_, Some(document))) = documents.into_iter().next() {
-                    Ok(DocumentSetPriceResult::Document(document))
+                    Ok((
+                        DocumentSetPriceResult::Document(document),
+                        state_transition_hash,
+                    ))
                 } else {
                     Err(Error::DriveProofError(
                         drive::error::proof::ProofError::UnexpectedResultProof(

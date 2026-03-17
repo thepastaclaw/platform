@@ -61,7 +61,7 @@ impl Sdk {
         burn_tokens_transition_builder: TokenBurnTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<BurnResult, Error> {
+    ) -> Result<(BurnResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = burn_tokens_transition_builder.settings;
@@ -70,25 +70,25 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenBalance(owner_id, remaining_balance) => {
-                Ok(BurnResult::TokenBalance(owner_id, remaining_balance))
+                Ok((BurnResult::TokenBalance(owner_id, remaining_balance), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenActionWithDocument(doc) => {
                 // This means the token keeps burning history
-                Ok(BurnResult::HistoricalDocument(doc))
+                Ok((BurnResult::HistoricalDocument(doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, doc) => {
                 // This means it's a group action with history
-                Ok(BurnResult::GroupActionWithDocument(power, doc))
+                Ok((BurnResult::GroupActionWithDocument(power, doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithTokenBalance(power, status, balance) => {
                 // Group action without history
-                Ok(BurnResult::GroupActionWithBalance(power, status, balance))
+                Ok((BurnResult::GroupActionWithBalance(power, status, balance), state_transition_hash))
             }
             _ => Err(Error::DriveProofError(
                 drive::error::proof::ProofError::UnexpectedResultProof(

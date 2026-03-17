@@ -60,7 +60,7 @@ impl Sdk {
         mint_tokens_transition_builder: TokenMintTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<MintResult, Error> {
+    ) -> Result<(MintResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = mint_tokens_transition_builder.settings;
@@ -69,25 +69,25 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenBalance(recipient_id_result, new_balance) => {
-                Ok(MintResult::TokenBalance(recipient_id_result, new_balance))
+                Ok((MintResult::TokenBalance(recipient_id_result, new_balance), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenActionWithDocument(doc) => {
                 // This means the token keeps minting history
-                Ok(MintResult::HistoricalDocument(doc))
+                Ok((MintResult::HistoricalDocument(doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, doc) => {
                 // This means it's a group action with history
-                Ok(MintResult::GroupActionWithDocument(power, doc))
+                Ok((MintResult::GroupActionWithDocument(power, doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithTokenBalance(power, status, balance) => {
                 // Group action without history
-                Ok(MintResult::GroupActionWithBalance(power, status, balance))
+                Ok((MintResult::GroupActionWithBalance(power, status, balance), state_transition_hash))
             }
             _ => Err(Error::DriveProofError(
                 drive::error::proof::ProofError::UnexpectedResultProof(

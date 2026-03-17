@@ -338,7 +338,7 @@ pub unsafe extern "C" fn dash_sdk_document_transfer_to_identity_and_wait(
             builder = builder.with_state_transition_creation_options(options);
         }
 
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .document_transfer(builder, identity_public_key, signer)
             .await

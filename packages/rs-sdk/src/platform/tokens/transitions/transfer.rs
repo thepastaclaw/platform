@@ -58,7 +58,7 @@ impl Sdk {
         transfer_tokens_transition_builder: TokenTransferTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<TransferResult, Error> {
+    ) -> Result<(TransferResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = transfer_tokens_transition_builder.settings;
@@ -67,19 +67,19 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenIdentitiesBalances(balances) => {
-                Ok(TransferResult::IdentitiesBalances(balances))
+                Ok((TransferResult::IdentitiesBalances(balances), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenActionWithDocument(doc) => {
-                Ok(TransferResult::HistoricalDocument(doc))
+                Ok((TransferResult::HistoricalDocument(doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, doc) => {
-                Ok(TransferResult::GroupActionWithDocument(power, doc))
+                Ok((TransferResult::GroupActionWithDocument(power, doc), state_transition_hash))
             }
             _ => Err(Error::DriveProofError(
                 drive::error::proof::ProofError::UnexpectedResultProof(

@@ -31,7 +31,7 @@ pub trait WithdrawFromIdentity {
         signing_withdrawal_key_to_use: Option<&IdentityPublicKey>,
         signer: S,
         settings: Option<PutSettings>,
-    ) -> Result<u64, Error>;
+    ) -> Result<(u64, [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -45,7 +45,7 @@ impl WithdrawFromIdentity for Identity {
         signing_withdrawal_key_to_use: Option<&IdentityPublicKey>,
         signer: S,
         settings: Option<PutSettings>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, [u8; 32]), Error> {
         let new_identity_nonce = sdk.get_identity_nonce(self.id(), true, settings).await?;
         let script = address.map(|address| CoreScript::new(address.script_pubkey()));
         let user_fee_increase = settings.and_then(|settings| settings.user_fee_increase);
@@ -65,13 +65,15 @@ impl WithdrawFromIdentity for Identity {
         )?;
         ensure_valid_state_transition_structure(&state_transition, sdk.version())?;
 
-        let result = state_transition.broadcast_and_wait(sdk, settings).await?;
+        let (result, state_transition_hash) =
+            state_transition.broadcast_and_wait(sdk, settings).await?;
 
         match result {
             StateTransitionProofResult::VerifiedPartialIdentity(identity) => {
-                identity.balance.ok_or(Error::Generic(
+                let balance = identity.balance.ok_or(Error::Generic(
                     "expected an identity balance after withdrawal".to_string(),
-                ))
+                ))?;
+                Ok((balance, state_transition_hash))
             }
             _ => Err(Error::Generic("proved a non identity".to_string())),
         }

@@ -225,7 +225,7 @@ impl WasmSdk {
 
         // Broadcast the transition
         use dash_sdk::dpp::state_transition::proof_result::StateTransitionProofResult;
-        state_transition
+        let (_result, _state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self.inner_sdk(), settings)
             .await?;
 

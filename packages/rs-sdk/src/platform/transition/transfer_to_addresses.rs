@@ -32,7 +32,7 @@ pub trait TransferToAddresses: Waitable {
         signing_transfer_key_to_use: Option<&IdentityPublicKey>,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<(AddressInfos, Credits), Error>;
+    ) -> Result<((AddressInfos, Credits), [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -44,7 +44,7 @@ impl TransferToAddresses for Identity {
         signing_transfer_key_to_use: Option<&IdentityPublicKey>,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<(AddressInfos, Credits), Error> {
+    ) -> Result<((AddressInfos, Credits), [u8; 32]), Error> {
         if recipient_addresses.is_empty() {
             return Err(Error::Generic(
                 "recipient_addresses must contain at least one address".to_string(),
@@ -72,10 +72,11 @@ impl TransferToAddresses for Identity {
         let expected_addresses: BTreeSet<PlatformAddress> =
             recipient_addresses.keys().copied().collect();
 
-        match state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(sdk, settings)
-            .await?
-        {
+            .await?;
+
+        match proof_result {
             StateTransitionProofResult::VerifiedIdentityWithAddressInfos(
                 identity,
                 address_infos_map,
@@ -97,7 +98,7 @@ impl TransferToAddresses for Identity {
                     )
                 })?;
 
-                Ok((address_infos, balance))
+                Ok(((address_infos, balance), state_transition_hash))
             }
             other => Err(Error::InvalidProvedResponse(format!(
                 "identity proof was expected for {:?}, but received {:?}",

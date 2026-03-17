@@ -243,7 +243,7 @@ pub unsafe extern "C" fn dash_sdk_identity_transfer_credits(
 
         eprintln!("🔵 dash_sdk_identity_transfer_credits: transfer_credits returned: {:?}", transfer_result.is_ok());
 
-        let (sender_balance, receiver_balance) = transfer_result
+        let ((sender_balance, receiver_balance), _state_transition_hash) = transfer_result
             .map_err(|e| {
                 eprintln!("❌ dash_sdk_identity_transfer_credits: transfer_credits failed: {}", e);
                 FFIError::InternalError(format!("Failed to transfer credits: {}", e))

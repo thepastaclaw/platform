@@ -202,7 +202,7 @@ impl WasmSdk {
             try_from_options_optional::<PutSettingsInput>(&options, "settings")?.map(Into::into);
 
         // Top up the identity
-        let new_balance = identity
+        let (new_balance, _state_transition_hash) = identity
             .top_up_identity(
                 self.inner_sdk(),
                 asset_lock_proof,
@@ -332,7 +332,7 @@ impl WasmSdk {
             try_from_options_optional::<PutSettingsInput>(&options, "settings")?.map(Into::into);
 
         // Transfer credits using rs-sdk method
-        let (sender_balance, recipient_balance) = identity
+        let ((sender_balance, recipient_balance), _state_transition_hash) = identity
             .transfer_credits(
                 self.inner_sdk(),
                 recipient_id,
@@ -483,7 +483,7 @@ impl WasmSdk {
             .transpose()?;
 
         // Perform the withdrawal
-        let remaining_balance = identity
+        let (remaining_balance, _state_transition_hash) = identity
             .withdraw(
                 self.inner_sdk(),
                 address,
@@ -688,7 +688,7 @@ impl WasmSdk {
 
         // Broadcast the transition
         use dash_sdk::dpp::state_transition::proof_result::StateTransitionProofResult;
-        state_transition
+        let (_result, _state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self.inner_sdk(), settings)
             .await
             .map_err(|e| WasmSdkError::generic(format!("Failed to broadcast update: {}", e)))?;

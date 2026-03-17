@@ -30,7 +30,7 @@ pub trait BroadcastStateTransition {
         &self,
         sdk: &Sdk,
         settings: Option<PutSettings>,
-    ) -> Result<T, Error>;
+    ) -> Result<(T, [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -264,8 +264,9 @@ impl BroadcastStateTransition for StateTransition {
         &self,
         sdk: &Sdk,
         settings: Option<PutSettings>,
-    ) -> Result<T, Error> {
+    ) -> Result<(T, [u8; 32]), Error> {
         trace!(state_transition = %self.name(), "broadcast_and_wait: start");
+        let state_transition_hash = self.transaction_id().map_err(Error::Protocol)?;
         trace!("broadcast_and_wait: step 1 - broadcasting");
         self.broadcast(sdk, settings).await?;
         trace!("broadcast_and_wait: step 2 - waiting for response");
@@ -274,6 +275,6 @@ impl BroadcastStateTransition for StateTransition {
             Ok(_) => trace!("broadcast_and_wait: complete success"),
             Err(e) => warn!(error = ?e, "broadcast_and_wait: failed"),
         }
-        result
+        result.map(|r| (r, state_transition_hash))
     }
 }

@@ -32,7 +32,7 @@ pub trait WithdrawAddressFunds<S: Signer<PlatformAddress>> {
         output_script: CoreScript,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error>;
+    ) -> Result<(AddressInfos, [u8; 32]), Error>;
 
     /// Withdraws address balances with explicitly provided nonces.
     ///
@@ -48,7 +48,7 @@ pub trait WithdrawAddressFunds<S: Signer<PlatformAddress>> {
         output_script: CoreScript,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error>;
+    ) -> Result<(AddressInfos, [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -63,7 +63,7 @@ impl<S: Signer<PlatformAddress>> WithdrawAddressFunds<S> for Sdk {
         output_script: CoreScript,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error> {
+    ) -> Result<(AddressInfos, [u8; 32]), Error> {
         let inputs_with_nonce = nonce_inc(fetch_inputs_with_nonce(self, &inputs).await?);
         self.withdraw_address_funds_with_nonce(
             inputs_with_nonce,
@@ -88,7 +88,7 @@ impl<S: Signer<PlatformAddress>> WithdrawAddressFunds<S> for Sdk {
         output_script: CoreScript,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error> {
+    ) -> Result<(AddressInfos, [u8; 32]), Error> {
         let user_fee_increase = settings
             .as_ref()
             .and_then(|settings| settings.user_fee_increase)
@@ -107,10 +107,11 @@ impl<S: Signer<PlatformAddress>> WithdrawAddressFunds<S> for Sdk {
         )?;
         ensure_valid_state_transition_structure(&state_transition, self.version())?;
 
-        match state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, settings)
-            .await?
-        {
+            .await?;
+
+        match proof_result {
             StateTransitionProofResult::VerifiedAddressInfos(address_infos_map) => {
                 let mut expected_addresses: BTreeSet<PlatformAddress> =
                     inputs.keys().copied().collect();
@@ -118,7 +119,9 @@ impl<S: Signer<PlatformAddress>> WithdrawAddressFunds<S> for Sdk {
                     expected_addresses.insert(change_address);
                 }
 
-                collect_address_infos_from_proof(address_infos_map, &expected_addresses)
+                let address_infos =
+                    collect_address_infos_from_proof(address_infos_map, &expected_addresses)?;
+                Ok((address_infos, state_transition_hash))
             }
             other => Err(Error::InvalidProvedResponse(format!(
                 "unexpected proof result for address withdrawal: {:?}",

@@ -53,7 +53,7 @@ impl Sdk {
         emergency_action_transition_builder: TokenEmergencyActionTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<EmergencyActionResult, Error> {
+    ) -> Result<(EmergencyActionResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = emergency_action_transition_builder.settings;
@@ -62,21 +62,21 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenActionWithDocument(document) => {
-                Ok(EmergencyActionResult::Document(document))
+                Ok((EmergencyActionResult::Document(document), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(
                 group_power,
                 document,
-            ) => Ok(EmergencyActionResult::GroupActionWithDocument(
+            ) => Ok((EmergencyActionResult::GroupActionWithDocument(
                 group_power,
                 document,
-            )),
+            ), state_transition_hash)),
             _ => Err(Error::DriveProofError(
                 drive::error::proof::ProofError::UnexpectedResultProof(
                     "Expected VerifiedTokenActionWithDocument or VerifiedTokenGroupActionWithDocument for emergency action transition"

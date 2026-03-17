@@ -176,7 +176,7 @@ pub unsafe extern "C" fn dash_sdk_token_transfer(
         }
 
         // Use SDK method to transfer and wait
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .token_transfer(builder, identity_public_key, signer)
             .await

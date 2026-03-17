@@ -284,7 +284,7 @@ unsafe fn dash_sdk_address_transfer_funds_inner(
 
     // Execute the transfer
     let result: Result<DashSDKAddressInfoMap, FFIError> = wrapper.runtime.block_on(async {
-        let address_infos = wrapper
+        let (address_infos, _state_transition_hash) = wrapper
             .sdk
             .transfer_address_funds(input_map, output_map, fee_strategy, &signer, None)
             .await

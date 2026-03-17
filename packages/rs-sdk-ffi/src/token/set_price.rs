@@ -214,7 +214,7 @@ pub unsafe extern "C" fn dash_sdk_token_set_price(
         }
 
         // Use SDK method to set price and wait
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .token_set_price_for_direct_purchase(builder, identity_public_key, signer)
             .await

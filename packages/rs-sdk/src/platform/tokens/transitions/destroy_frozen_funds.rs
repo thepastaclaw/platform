@@ -51,7 +51,7 @@ impl Sdk {
         destroy_frozen_funds_transition_builder: TokenDestroyFrozenFundsTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<DestroyFrozenFundsResult, Error> {
+    ) -> Result<(DestroyFrozenFundsResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = destroy_frozen_funds_transition_builder.settings;
@@ -60,18 +60,18 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenActionWithDocument(doc) => {
                 // DestroyFrozenFunds always keeps history
-                Ok(DestroyFrozenFundsResult::HistoricalDocument(doc))
+                Ok((DestroyFrozenFundsResult::HistoricalDocument(doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, doc) => {
                 // Group action with history
-                Ok(DestroyFrozenFundsResult::GroupActionWithDocument(power, doc))
+                Ok((DestroyFrozenFundsResult::GroupActionWithDocument(power, doc), state_transition_hash))
             }
             _ => Err(Error::DriveProofError(
                 drive::error::proof::ProofError::UnexpectedResultProof(

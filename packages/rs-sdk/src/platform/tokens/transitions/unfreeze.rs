@@ -59,7 +59,7 @@ impl Sdk {
         unfreeze_tokens_transition_builder: TokenUnfreezeTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<UnfreezeResult, Error> {
+    ) -> Result<(UnfreezeResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = unfreeze_tokens_transition_builder.settings;
@@ -68,25 +68,25 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenIdentityInfo(owner_id_result, info) => {
-                Ok(UnfreezeResult::IdentityInfo(owner_id_result, info))
+                Ok((UnfreezeResult::IdentityInfo(owner_id_result, info), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenActionWithDocument(doc) => {
                 // This means the token keeps unfreezing history
-                Ok(UnfreezeResult::HistoricalDocument(doc))
+                Ok((UnfreezeResult::HistoricalDocument(doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, doc) => {
                 // This means it's a group action with history
-                Ok(UnfreezeResult::GroupActionWithDocument(power, doc))
+                Ok((UnfreezeResult::GroupActionWithDocument(power, doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithTokenIdentityInfo(power, _, Some(info)) => {
                 // Group action without history
-                Ok(UnfreezeResult::GroupActionWithIdentityInfo(power, info))
+                Ok((UnfreezeResult::GroupActionWithIdentityInfo(power, info), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithTokenIdentityInfo(_, _, None) => {
                 Err(Error::DriveProofError(

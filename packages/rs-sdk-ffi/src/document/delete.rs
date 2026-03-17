@@ -347,7 +347,7 @@ pub unsafe extern "C" fn dash_sdk_document_delete_and_wait(
         debug!("[DOCUMENT DELETE] calling SDK document_delete");
         debug!(key_id = identity_public_key.id(), purpose = ?identity_public_key.purpose(), security_level = ?identity_public_key.security_level(), key_type = ?identity_public_key.key_type(), "[DOCUMENT DELETE] identity public key info");
 
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .document_delete(builder, identity_public_key, signer)
             .await

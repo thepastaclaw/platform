@@ -91,7 +91,7 @@ impl WasmSdk {
         let st: StateTransition = state_transition.into();
         let put_settings = parse_put_settings(settings)?;
 
-        let result = st
+        let (result, _state_transition_hash) = st
             .broadcast_and_wait::<StateTransitionProofResult>(self.as_ref(), put_settings)
             .await
             .map_err(|e| WasmSdkError::generic(format!("Failed to broadcast: {}", e)))?;

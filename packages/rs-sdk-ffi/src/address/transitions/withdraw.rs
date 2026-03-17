@@ -262,7 +262,7 @@ unsafe fn dash_sdk_address_withdraw_funds_inner(
 
     // Execute the withdrawal
     let result: Result<DashSDKAddressInfoMap, FFIError> = wrapper.runtime.block_on(async {
-        let address_infos = wrapper
+        let (address_infos, _state_transition_hash) = wrapper
             .sdk
             .withdraw_address_funds(
                 input_map,

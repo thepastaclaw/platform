@@ -247,7 +247,7 @@ impl Sdk {
         delete_document_transition_builder: DocumentDeleteTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<DocumentDeleteResult, Error> {
+    ) -> Result<(DocumentDeleteResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = delete_document_transition_builder.settings;
@@ -256,7 +256,7 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
@@ -264,7 +264,10 @@ impl Sdk {
             StateTransitionProofResult::VerifiedDocuments(documents) => {
                 if let Some((document_id, None)) = documents.into_iter().next() {
                     // None indicates the document has been deleted
-                    Ok(DocumentDeleteResult::Deleted(document_id))
+                    Ok((
+                        DocumentDeleteResult::Deleted(document_id),
+                        state_transition_hash,
+                    ))
                 } else {
                     Err(Error::DriveProofError(
                         drive::error::proof::ProofError::UnexpectedResultProof(

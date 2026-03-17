@@ -65,7 +65,7 @@ impl Sdk {
         set_price_transition_builder: TokenChangeDirectPurchasePriceTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<SetPriceResult, Error> {
+    ) -> Result<(SetPriceResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = set_price_transition_builder.settings;
@@ -74,22 +74,22 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenPricingSchedule(owner_id, schedule) => {
-                Ok(SetPriceResult::PricingSchedule(owner_id, schedule))
+                Ok((SetPriceResult::PricingSchedule(owner_id, schedule), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenActionWithDocument(doc) => {
-                Ok(SetPriceResult::HistoricalDocument(doc))
+                Ok((SetPriceResult::HistoricalDocument(doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, doc) => {
-                Ok(SetPriceResult::GroupActionWithDocument(power, doc))
+                Ok((SetPriceResult::GroupActionWithDocument(power, doc), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithTokenPricingSchedule(power, status, schedule) => {
-                Ok(SetPriceResult::GroupActionWithPricingSchedule(power, status, schedule))
+                Ok((SetPriceResult::GroupActionWithPricingSchedule(power, status, schedule), state_transition_hash))
             }
             _ => Err(Error::DriveProofError(
                 drive::error::proof::ProofError::UnexpectedResultProof(

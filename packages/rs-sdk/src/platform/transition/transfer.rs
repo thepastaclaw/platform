@@ -32,7 +32,7 @@ pub trait TransferToIdentity: Waitable {
         signing_transfer_key_to_use: Option<&IdentityPublicKey>,
         signer: S,
         settings: Option<PutSettings>,
-    ) -> Result<(u64, u64), Error>;
+    ) -> Result<((u64, u64), [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -45,7 +45,7 @@ impl TransferToIdentity for Identity {
         signing_transfer_key_to_use: Option<&IdentityPublicKey>,
         signer: S,
         settings: Option<PutSettings>,
-    ) -> Result<(u64, u64), Error> {
+    ) -> Result<((u64, u64), [u8; 32]), Error> {
         let new_identity_nonce = sdk.get_identity_nonce(self.id(), true, settings).await?;
         let user_fee_increase = settings.and_then(|settings| settings.user_fee_increase);
         let state_transition = IdentityCreditTransferTransition::try_from_identity(
@@ -61,8 +61,10 @@ impl TransferToIdentity for Identity {
         )?;
         ensure_valid_state_transition_structure(&state_transition, sdk.version())?;
 
-        let (sender, receiver): (PartialIdentity, PartialIdentity) =
-            state_transition.broadcast_and_wait(sdk, settings).await?;
+        let ((sender, receiver), state_transition_hash): (
+            (PartialIdentity, PartialIdentity),
+            [u8; 32],
+        ) = state_transition.broadcast_and_wait(sdk, settings).await?;
 
         let sender_balance = sender.balance.ok_or_else(|| {
             Error::Generic("expected an identity balance after transfer (sender)".to_string())
@@ -72,6 +74,6 @@ impl TransferToIdentity for Identity {
             Error::Generic("expected an identity balance after transfer (receiver)".to_string())
         })?;
 
-        Ok((sender_balance, receiver_balance))
+        Ok(((sender_balance, receiver_balance), state_transition_hash))
     }
 }

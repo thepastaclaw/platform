@@ -394,7 +394,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_mint method which handles signing, broadcasting, and result parsing
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_mint(builder, &identity_key, &signer)
             .await
@@ -622,7 +622,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_burn method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_burn(builder, &identity_key, &signer)
             .await
@@ -861,7 +861,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_transfer method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_transfer(builder, &identity_key, &signer)
             .await
@@ -1079,7 +1079,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_freeze method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_freeze(builder, &identity_key, &signer)
             .await
@@ -1292,7 +1292,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_unfreeze_identity method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_unfreeze_identity(builder, &identity_key, &signer)
             .await
@@ -1491,7 +1491,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_destroy_frozen_funds method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_destroy_frozen_funds(builder, &identity_key, &signer)
             .await
@@ -1709,7 +1709,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_emergency_action method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_emergency_action(builder, &identity_key, &signer)
             .await
@@ -1905,7 +1905,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_claim method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_claim(builder, &identity_key, &signer)
             .await
@@ -2144,7 +2144,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_set_price_for_direct_purchase method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_set_price_for_direct_purchase(builder, &identity_key, &signer)
             .await
@@ -2356,7 +2356,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_purchase method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_purchase(builder, &identity_key, &signer)
             .await
@@ -2559,7 +2559,7 @@ impl WasmSdk {
         }
 
         // Use the SDK's token_update_contract_token_configuration method
-        let result = self
+        let (result, _state_transition_hash) = self
             .inner_sdk()
             .token_update_contract_token_configuration(builder, &identity_key, &signer)
             .await

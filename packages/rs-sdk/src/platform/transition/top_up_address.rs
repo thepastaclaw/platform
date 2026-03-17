@@ -32,7 +32,7 @@ pub trait TopUpAddress<S: Signer<PlatformAddress>> {
         fee_strategy: AddressFundsFeeStrategy,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error>;
+    ) -> Result<(AddressInfos, [u8; 32]), Error>;
 }
 
 pub type AddressWithBalance = (PlatformAddress, Option<Credits>);
@@ -51,7 +51,7 @@ where
         fee_strategy: AddressFundsFeeStrategy,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error> {
+    ) -> Result<(AddressInfos, [u8; 32]), Error> {
         BTreeMap::from([(self.0, self.1)])
             .top_up(
                 sdk,
@@ -75,7 +75,7 @@ impl<S: Signer<PlatformAddress>> TopUpAddress<S> for AddressesWithBalances {
         fee_strategy: AddressFundsFeeStrategy,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error> {
+    ) -> Result<(AddressInfos, [u8; 32]), Error> {
         if self.is_empty() {
             return Err(Error::from(TransitionNoOutputsError::new()));
         }
@@ -97,14 +97,16 @@ impl<S: Signer<PlatformAddress>> TopUpAddress<S> for AddressesWithBalances {
         )?;
 
         ensure_valid_state_transition_structure(&state_transition, sdk.version())?;
-        let st_result = state_transition
+        let (st_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(sdk, settings)
             .await?;
         match st_result {
             StateTransitionProofResult::VerifiedAddressInfos(address_infos) => {
                 let expected_addresses =
                     self.keys().copied().collect::<BTreeSet<PlatformAddress>>();
-                collect_address_infos_from_proof(address_infos, &expected_addresses)
+                let address_infos =
+                    collect_address_infos_from_proof(address_infos, &expected_addresses)?;
+                Ok((address_infos, state_transition_hash))
             }
             other => Err(Error::InvalidProvedResponse(format!(
                 "address info proof was expected for {:?}, but received {:?}",

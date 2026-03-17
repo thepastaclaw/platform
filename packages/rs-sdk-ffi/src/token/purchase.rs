@@ -166,7 +166,7 @@ pub unsafe extern "C" fn dash_sdk_token_purchase(
         }
 
         // Use SDK method to purchase and wait
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .token_purchase(builder, identity_public_key, signer)
             .await

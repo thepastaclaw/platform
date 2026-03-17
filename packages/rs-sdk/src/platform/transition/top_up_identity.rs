@@ -18,7 +18,7 @@ pub trait TopUpIdentity: Waitable {
         asset_lock_proof_private_key: &PrivateKey,
         user_fee_increase: Option<UserFeeIncrease>,
         settings: Option<PutSettings>,
-    ) -> Result<u64, Error>;
+    ) -> Result<(u64, [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -30,7 +30,7 @@ impl TopUpIdentity for Identity {
         asset_lock_proof_private_key: &PrivateKey,
         user_fee_increase: Option<UserFeeIncrease>,
         settings: Option<PutSettings>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(u64, [u8; 32]), Error> {
         let state_transition = IdentityTopUpTransition::try_from_identity(
             self,
             asset_lock_proof,
@@ -40,10 +40,13 @@ impl TopUpIdentity for Identity {
             None,
         )?;
         ensure_valid_state_transition_structure(&state_transition, sdk.version())?;
-        let identity: PartialIdentity = state_transition.broadcast_and_wait(sdk, settings).await?;
+        let (identity, state_transition_hash): (PartialIdentity, [u8; 32]) =
+            state_transition.broadcast_and_wait(sdk, settings).await?;
 
-        identity
+        let balance = identity
             .balance
-            .ok_or(Error::Generic("expected an identity balance".to_string()))
+            .ok_or(Error::Generic("expected an identity balance".to_string()))?;
+
+        Ok((balance, state_transition_hash))
     }
 }

@@ -27,7 +27,7 @@ pub trait TransferAddressFunds<S: Signer<PlatformAddress>> {
         fee_strategy: AddressFundsFeeStrategy,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error>;
+    ) -> Result<(AddressInfos, [u8; 32]), Error>;
 
     /// Broadcast address funds transfer with explicitly provided address nonces.
     ///
@@ -39,7 +39,7 @@ pub trait TransferAddressFunds<S: Signer<PlatformAddress>> {
         fee_strategy: AddressFundsFeeStrategy,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error>;
+    ) -> Result<(AddressInfos, [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -51,7 +51,7 @@ impl<S: Signer<PlatformAddress>> TransferAddressFunds<S> for Sdk {
         fee_strategy: AddressFundsFeeStrategy,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error> {
+    ) -> Result<(AddressInfos, [u8; 32]), Error> {
         let inputs_with_nonce = nonce_inc(fetch_inputs_with_nonce(self, &inputs).await?);
         self.transfer_address_funds_with_nonce(
             inputs_with_nonce,
@@ -70,7 +70,7 @@ impl<S: Signer<PlatformAddress>> TransferAddressFunds<S> for Sdk {
         fee_strategy: AddressFundsFeeStrategy,
         signer: &S,
         settings: Option<PutSettings>,
-    ) -> Result<AddressInfos, Error> {
+    ) -> Result<(AddressInfos, [u8; 32]), Error> {
         if outputs.is_empty() {
             return Err(Error::from(TransitionNoOutputsError::new()));
         }
@@ -93,12 +93,15 @@ impl<S: Signer<PlatformAddress>> TransferAddressFunds<S> for Sdk {
         let expected_addresses: BTreeSet<PlatformAddress> =
             inputs.keys().chain(outputs.keys()).copied().collect();
 
-        match state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, settings)
-            .await?
-        {
+            .await?;
+
+        match proof_result {
             StateTransitionProofResult::VerifiedAddressInfos(address_infos_map) => {
-                collect_address_infos_from_proof(address_infos_map, &expected_addresses)
+                let address_infos =
+                    collect_address_infos_from_proof(address_infos_map, &expected_addresses)?;
+                Ok((address_infos, state_transition_hash))
             }
             other => Err(Error::InvalidProvedResponse(format!(
                 "address info proof was expected for {:?}, but received {:?}",

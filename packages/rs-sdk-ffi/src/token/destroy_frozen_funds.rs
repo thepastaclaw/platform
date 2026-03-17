@@ -174,7 +174,7 @@ pub unsafe extern "C" fn dash_sdk_token_destroy_frozen_funds(
         }
 
         // Use SDK method to destroy frozen funds and wait
-        let result = wrapper
+        let (result, _state_transition_hash) = wrapper
             .sdk
             .token_destroy_frozen_funds(builder, identity_public_key, signer)
             .await

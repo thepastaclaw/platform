@@ -64,7 +64,7 @@ pub unsafe extern "C" fn dash_sdk_identity_topup_with_instant_lock(
         // Use TopUp trait to top up identity
         use dash_sdk::platform::transition::top_up_identity::TopUpIdentity;
 
-        let new_balance = identity
+        let (new_balance, _state_transition_hash) = identity
             .top_up_identity(
                 &wrapper.sdk,
                 asset_lock_proof,
@@ -138,7 +138,7 @@ pub unsafe extern "C" fn dash_sdk_identity_topup_with_instant_lock_and_wait(
         // Use TopUp trait to top up identity and wait for response
         use dash_sdk::platform::transition::top_up_identity::TopUpIdentity;
 
-        let _new_balance = identity
+        let (_new_balance, _state_transition_hash) = identity
             .top_up_identity(
                 &wrapper.sdk,
                 asset_lock_proof,

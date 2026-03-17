@@ -52,7 +52,7 @@ impl Sdk {
         claim_tokens_transition_builder: TokenClaimTransitionBuilder,
         signing_key: &IdentityPublicKey,
         signer: &S,
-    ) -> Result<ClaimResult, Error> {
+    ) -> Result<(ClaimResult, [u8; 32]), Error> {
         let platform_version = self.version();
 
         let put_settings = claim_tokens_transition_builder.settings;
@@ -61,16 +61,16 @@ impl Sdk {
             .sign(self, signing_key, signer, platform_version)
             .await?;
 
-        let proof_result = state_transition
+        let (proof_result, state_transition_hash) = state_transition
             .broadcast_and_wait::<StateTransitionProofResult>(self, put_settings)
             .await?;
 
         match proof_result {
             StateTransitionProofResult::VerifiedTokenActionWithDocument(document) => {
-                Ok(ClaimResult::Document(document))
+                Ok((ClaimResult::Document(document), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(power, Some(document)) => {
-                Ok(ClaimResult::GroupActionWithDocument(power, document))
+                Ok((ClaimResult::GroupActionWithDocument(power, document), state_transition_hash))
             }
             StateTransitionProofResult::VerifiedTokenGroupActionWithDocument(_, None) => {
                 Err(Error::DriveProofError(

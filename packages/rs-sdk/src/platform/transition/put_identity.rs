@@ -61,7 +61,7 @@ pub trait PutIdentity<IS: Signer<IdentityPublicKey>>: Waitable {
         identity_signer: &IS,
         input_address_signer: &AS,
         settings: Option<PutSettings>,
-    ) -> Result<(Identity, AddressInfos), Error>;
+    ) -> Result<((Identity, AddressInfos), [u8; 32]), Error>;
 }
 
 #[async_trait::async_trait]
@@ -114,7 +114,7 @@ impl<IS: Signer<IdentityPublicKey>> PutIdentity<IS> for Identity {
         identity_signer: &IS,
         input_address_signer: &AS,
         settings: Option<PutSettings>,
-    ) -> Result<(Identity, AddressInfos), Error> {
+    ) -> Result<((Identity, AddressInfos), [u8; 32]), Error> {
         put_identity_with_address_funding::<IS, AS>(
             self,
             sdk,
@@ -158,7 +158,7 @@ async fn put_identity_with_address_funding<
     identity_signer: &IS,
     input_signer: &AS,
     settings: Option<PutSettings>,
-) -> Result<(Identity, AddressInfos), Error> {
+) -> Result<((Identity, AddressInfos), [u8; 32]), Error> {
     let expected_addresses: BTreeSet<PlatformAddress> =
         inputs.keys().copied().collect::<BTreeSet<_>>();
 
@@ -189,10 +189,11 @@ async fn put_identity_with_address_funding<
 
     ensure_valid_state_transition_structure(&state_transition, sdk.version())?;
 
-    match state_transition
+    let (proof_result, state_transition_hash) = state_transition
         .broadcast_and_wait::<StateTransitionProofResult>(sdk, settings)
-        .await?
-    {
+        .await?;
+
+    match proof_result {
         StateTransitionProofResult::VerifiedIdentityFullWithAddressInfos(
             proved_identity,
             address_infos_map,
@@ -208,7 +209,7 @@ async fn put_identity_with_address_funding<
             let address_infos =
                 collect_address_infos_from_proof(address_infos_map, &expected_addresses)?;
 
-            Ok((proved_identity, address_infos))
+            Ok(((proved_identity, address_infos), state_transition_hash))
         }
         other => Err(Error::InvalidProvedResponse(format!(
             "identity proof was expected but not returned: {:?}",
