@@ -381,11 +381,11 @@ where
 ///       fee_target_balance − estimated_fee]`. If the range is empty
 ///    (no headroom), extend the prefix and retry; error out only
 ///    when candidates are exhausted.
-/// 4. Insert the fee target at its minimum consumption, then
-///    distribute the remainder of `total_output` across the other
-///    prefix entries in caller-supplied order. Tail consumptions
-///    below `min_input_amount` get folded back into the fee target
-///    rather than producing a sub-minimum input.
+/// 4. Allocate the exact `total_output` over the chosen prefix:
+///    start every selected entry at `min_input_amount`, distribute
+///    the remaining credits over non-fee-target peers in caller
+///    order up to balance, then let the fee target absorb any final
+///    remainder up to `fee_target_balance − estimated_fee`.
 /// 5. Defensive invariant checks.
 ///
 /// Caller (`auto_select_inputs`) sorts candidates balance-descending
@@ -441,7 +441,7 @@ fn select_inputs_deduct_from_input(
     let mut prefix: Vec<(PlatformAddress, Credits)> = Vec::new();
     let mut accumulated: Credits = 0;
     let mut last_estimated_fee: Credits = 0;
-    let mut feasible: Option<(PlatformAddress, Credits, Credits, Credits)> = None;
+    let mut feasible: Option<(usize, PlatformAddress, Credits, Credits)> = None;
 
     for (address, balance) in candidates {
         prefix.push((address, balance));
@@ -496,9 +496,9 @@ fn select_inputs_deduct_from_input(
 
         if fee_target_min <= fee_target_max {
             feasible = Some((
+                prefix.len(),
                 fee_target_addr,
                 fee_target_balance,
-                fee_target_min,
                 estimated_fee,
             ));
             break;
@@ -506,7 +506,7 @@ fn select_inputs_deduct_from_input(
         // Phase 3 failed for this prefix size: keep growing.
     }
 
-    let Some((fee_target_addr, fee_target_balance, fee_target_min, estimated_fee)) = feasible
+    let Some((feasible_prefix_len, fee_target_addr, fee_target_balance, estimated_fee)) = feasible
     else {
         // Distinguish "couldn't cover total_output + fee" from
         // "covered but no headroom-feasible fee target".
@@ -531,83 +531,19 @@ fn select_inputs_deduct_from_input(
         )));
     };
 
-    // Phase 4: consume `fee_target_min` from the fee target, distribute
-    // the rest of `total_output` over the remaining prefix in caller
-    // order. Tail consumptions below `min_input_amount` get folded into
-    // the fee target — `validate_structure` would otherwise reject the
-    // transition with `InputBelowMinimumError`.
-    let mut fee_target_consumed = fee_target_min;
     let fee_target_max = checked_credits_sub(
         fee_target_balance,
         estimated_fee,
         "select_inputs_deduct_from_input: Phase 4 fee_target_max",
     )?;
-    let mut selected: BTreeMap<PlatformAddress, Credits> = BTreeMap::new();
-
-    let mut remaining = checked_credits_sub(
+    let selected_prefix = &prefix[..feasible_prefix_len];
+    let selected = allocate_prefix_consumptions(
+        selected_prefix,
         total_output,
-        fee_target_consumed,
-        "select_inputs_deduct_from_input: Phase 4 remaining",
+        min_input_amount,
+        Some((fee_target_addr, fee_target_max)),
+        "select_inputs_deduct_from_input",
     )?;
-    let mut residue_to_fee_target: Credits = 0;
-    for (addr, bal) in prefix.iter() {
-        if *addr == fee_target_addr {
-            continue;
-        }
-        if remaining == 0 {
-            break;
-        }
-        let tentative = (*bal).min(remaining);
-        if tentative == 0 {
-            continue;
-        }
-        if tentative < min_input_amount {
-            // Sub-minimum input — fold into the fee target.
-            residue_to_fee_target = checked_credits_add(
-                residue_to_fee_target,
-                tentative,
-                "select_inputs_deduct_from_input: residue_to_fee_target",
-            )?;
-            remaining = checked_credits_sub(
-                remaining,
-                tentative,
-                "select_inputs_deduct_from_input: remaining after residue fold",
-            )?;
-            continue;
-        }
-        selected.insert(*addr, tentative);
-        remaining = checked_credits_sub(
-            remaining,
-            tentative,
-            "select_inputs_deduct_from_input: remaining after select",
-        )?;
-    }
-
-    if residue_to_fee_target > 0 {
-        let new_consumed = checked_credits_add(
-            fee_target_consumed,
-            residue_to_fee_target,
-            "select_inputs_deduct_from_input: new_consumed",
-        )?;
-        if new_consumed > fee_target_max {
-            // Should be unreachable given Phase 3's headroom check, but
-            // guarded explicitly: silently shipping an invalid
-            // transition would be worse than a loud error here.
-            return Err(PlatformWalletError::AddressOperation(format!(
-                "Cannot satisfy fee headroom after redistributing sub-minimum tail \
-                 inputs: fee-target {} would consume {} (balance {}, max {}), leaving \
-                 less than estimated fee {} of remaining balance",
-                format_address(&fee_target_addr),
-                new_consumed,
-                fee_target_balance,
-                fee_target_max,
-                estimated_fee,
-            )));
-        }
-        fee_target_consumed = new_consumed;
-    }
-
-    selected.insert(fee_target_addr, fee_target_consumed);
 
     // Phase 5: defensive invariant checks. Fail loudly here rather
     // than ship a transition the validator will reject.
@@ -618,10 +554,14 @@ fn select_inputs_deduct_from_input(
         Some(fee_target_addr),
         "fee target must be the BTreeMap index-0 (lex-smallest) entry"
     );
+    debug_assert!(
+        selected[&fee_target_addr] <= fee_target_max,
+        "fee target consumed amount must leave estimated_fee in remaining balance"
+    );
     // Saturating-sub is fine here: the assert exists to catch a
     // negative remaining (which saturates to 0 and trips `>= estimated_fee`).
     debug_assert!(
-        fee_target_balance.saturating_sub(fee_target_consumed) >= estimated_fee,
+        fee_target_balance.saturating_sub(selected[&fee_target_addr]) >= estimated_fee,
         "fee target must retain ≥ estimated_fee remaining balance for DeductFromInput(0)"
     );
     debug_assert!(
@@ -652,16 +592,13 @@ fn select_inputs_deduct_from_input(
 ///
 /// Algorithm (mirrors the 5-phase shape of the input-side helper):
 /// 1. Grow the prefix until `Σ balances ≥ total_output`.
-/// 2. Trim the last prefix entry by `surplus = Σ − total_output` so
-///    `Σ inputs == Σ outputs`. Earlier entries stay at full balance.
-/// 3. If the trim drops the last entry below `min_input_amount`,
-///    shift consumption from the lex-smallest peer to lift it back up
-///    while keeping the peer ≥ `min_input_amount`. Error out if no
-///    peer has the headroom.
-/// 4. Estimate the fee for the chosen input count and verify
+/// 2. Allocate the exact `total_output` over that prefix: start every
+///    selected entry at `min_input_amount`, then distribute the
+///    remaining credits in caller order up to each address balance.
+/// 3. Estimate the fee for the chosen input count and verify
 ///    `output[0] ≥ estimated_fee`; otherwise the chain-time
 ///    `ReduceOutput(0)` deduction would leave the fee uncovered.
-/// 5. Defensive invariant checks.
+/// 4. Defensive invariant checks.
 fn select_inputs_reduce_output(
     candidates: Vec<(PlatformAddress, Credits)>,
     outputs: &BTreeMap<PlatformAddress, Credits>,
@@ -696,7 +633,7 @@ fn select_inputs_reduce_output(
     }
 
     // Phase 1: walk `candidates` until the running sum covers
-    // `total_output`. Last entry will be trimmed in Phase 2.
+    // `total_output`.
     let mut prefix: Vec<(PlatformAddress, Credits)> = Vec::new();
     let mut accumulated: Credits = 0;
     for (address, balance) in candidates {
@@ -719,55 +656,17 @@ fn select_inputs_reduce_output(
         )));
     }
 
-    // Phase 2: every prefix entry consumes its full balance except
-    // the last, which absorbs the surplus.
-    let mut selected: BTreeMap<PlatformAddress, Credits> = BTreeMap::new();
-    let surplus = accumulated - total_output;
-    let last_index = prefix.len() - 1;
-    for (i, (addr, balance)) in prefix.iter().enumerate() {
-        let consumed = if i == last_index {
-            // Loop above stops as soon as `accumulated >= total_output`,
-            // so before the final push we had `accumulated_prev <
-            // total_output`, hence `surplus = accumulated_prev +
-            // balance - total_output < balance`. Saturating-sub is
-            // documentary defense, the underflow path is unreachable.
-            balance.saturating_sub(surplus)
-        } else {
-            *balance
-        };
-        selected.insert(*addr, consumed);
-    }
+    // Phase 2: allocate the exact total across the covering prefix while
+    // keeping every selected input at or above the protocol minimum.
+    let selected = allocate_prefix_consumptions(
+        &prefix,
+        total_output,
+        min_input_amount,
+        None,
+        "select_inputs_reduce_output",
+    )?;
 
-    // Phase 3: if the trim dropped the last entry below
-    // `min_input_amount`, lift it from the lex-smallest peer with
-    // spare balance. The peer must keep ≥ `min_input_amount` itself.
-    let last_addr = prefix[last_index].0;
-    let last_consumed = selected[&last_addr];
-    if last_consumed < min_input_amount && prefix.len() > 1 {
-        let shift = min_input_amount - last_consumed;
-        let donor_threshold = checked_credits_add(
-            min_input_amount,
-            shift,
-            "select_inputs_reduce_output: donor_threshold",
-        )?;
-        let donor_addr = prefix
-            .iter()
-            .filter(|(addr, _)| *addr != last_addr)
-            .find(|(_, balance)| *balance >= donor_threshold)
-            .map(|(addr, _)| *addr);
-        let Some(donor_addr) = donor_addr else {
-            return Err(PlatformWalletError::AddressOperation(format!(
-                "Cannot satisfy per-input minimum: trimming the last input to \
-                 {} (below {}) and no peer has ≥ {} of headroom to redistribute",
-                last_consumed, min_input_amount, donor_threshold,
-            )));
-        };
-        let donor_consumed = selected[&donor_addr];
-        selected.insert(donor_addr, donor_consumed - shift);
-        selected.insert(last_addr, last_consumed + shift);
-    }
-
-    // Phase 4: ReduceOutput(0) takes the fee from output 0 at chain
+    // Phase 3: ReduceOutput(0) takes the fee from output 0 at chain
     // time; verify the chosen output 0 has enough to absorb it.
     //
     // KNOWN BUG — platform #3040: `PlatformAddressWallet::estimate_fee_for_inputs` returns
@@ -781,7 +680,7 @@ fn select_inputs_reduce_output(
     // Until #3040 is fixed at the dpp layer, callers with small `output[0]`
     // (where `output[0]` >= static estimate but < chain-time fee) should
     // prefer `[DeductFromInput(0)]` so any shortfall comes out of an input
-    // rather than the absorbing output. The Phase 4 check below remains as
+    // rather than the absorbing output. The Phase 3 check below remains as
     // the static lower-bound gate; it cannot reject the chain-time-only
     // failure mode.
     let estimated_fee = PlatformAddressWallet::estimate_fee_for_inputs(
@@ -800,7 +699,7 @@ fn select_inputs_reduce_output(
         )));
     }
 
-    // Phase 5: defensive invariant checks. Fail loudly here rather
+    // Phase 4: defensive invariant checks. Fail loudly here rather
     // than ship a transition the validator will reject.
     let input_sum: Credits = selected.values().sum();
     debug_assert_eq!(input_sum, total_output, "Σ inputs == Σ outputs invariant");
@@ -813,6 +712,138 @@ fn select_inputs_reduce_output(
         return Err(PlatformWalletError::AddressOperation(format!(
             "Internal selection error: Σ inputs ({}) != total_output ({})",
             input_sum, total_output
+        )));
+    }
+
+    Ok(selected)
+}
+
+/// Allocate the exact `total_output` over a chosen prefix while keeping
+/// every selected input at or above `min_input_amount`.
+///
+/// When `fee_target` is present, that address is filled last and capped
+/// at its caller-supplied maximum consumable amount.
+fn allocate_prefix_consumptions(
+    prefix: &[(PlatformAddress, Credits)],
+    total_output: Credits,
+    min_input_amount: Credits,
+    fee_target: Option<(PlatformAddress, Credits)>,
+    context: &str,
+) -> Result<BTreeMap<PlatformAddress, Credits>, PlatformWalletError> {
+    if prefix.is_empty() {
+        return Err(PlatformWalletError::AddressOperation(format!(
+            "{context}: no inputs available for allocation"
+        )));
+    }
+
+    let prefix_len =
+        u64::try_from(prefix.len()).map_err(|_| PlatformWalletError::ArithmeticOverflow {
+            context: format!("{context}: prefix length conversion"),
+        })?;
+    let minimum_total = checked_credits_mul(
+        prefix_len,
+        min_input_amount,
+        &format!("{context}: minimum_total"),
+    )?;
+    if minimum_total > total_output {
+        return Err(PlatformWalletError::AddressOperation(format!(
+            "{context}: cannot allocate {} credits across {} selected inputs with protocol minimum {}",
+            total_output,
+            prefix.len(),
+            min_input_amount,
+        )));
+    }
+
+    let mut selected: BTreeMap<PlatformAddress, Credits> = BTreeMap::new();
+    for (addr, balance) in prefix.iter() {
+        if *balance < min_input_amount {
+            return Err(PlatformWalletError::AddressOperation(format!(
+                "{context}: selected input {} has balance {} below protocol minimum {}",
+                format_address(addr),
+                balance,
+                min_input_amount,
+            )));
+        }
+        selected.insert(*addr, min_input_amount);
+    }
+
+    let mut remaining = checked_credits_sub(
+        total_output,
+        minimum_total,
+        &format!("{context}: remaining after minimum allocation"),
+    )?;
+
+    for (addr, balance) in prefix.iter() {
+        if remaining == 0 {
+            break;
+        }
+        if fee_target
+            .as_ref()
+            .is_some_and(|(fee_target_addr, _)| fee_target_addr == addr)
+        {
+            continue;
+        }
+
+        let current = selected[addr];
+        let extra_capacity = checked_credits_sub(
+            *balance,
+            current,
+            &format!("{context}: non-fee-target extra capacity"),
+        )?;
+        let extra = remaining.min(extra_capacity);
+        let new_amount = checked_credits_add(
+            current,
+            extra,
+            &format!("{context}: non-fee-target updated consumption"),
+        )?;
+        selected.insert(*addr, new_amount);
+        remaining = checked_credits_sub(
+            remaining,
+            extra,
+            &format!("{context}: remaining after non-fee-target allocation"),
+        )?;
+    }
+
+    if let Some((fee_target_addr, fee_target_max)) = fee_target {
+        if remaining > 0 {
+            let current = *selected.get(&fee_target_addr).ok_or_else(|| {
+                PlatformWalletError::AddressOperation(format!(
+                    "{context}: fee target {} not present in selected prefix",
+                    format_address(&fee_target_addr),
+                ))
+            })?;
+            if fee_target_max < current {
+                return Err(PlatformWalletError::AddressOperation(format!(
+                    "{context}: fee target {} maximum consumable {} is below minimum allocation {}",
+                    format_address(&fee_target_addr),
+                    fee_target_max,
+                    current,
+                )));
+            }
+            let extra_capacity = checked_credits_sub(
+                fee_target_max,
+                current,
+                &format!("{context}: fee-target extra capacity"),
+            )?;
+            let extra = remaining.min(extra_capacity);
+            let new_amount = checked_credits_add(
+                current,
+                extra,
+                &format!("{context}: fee-target updated consumption"),
+            )?;
+            selected.insert(fee_target_addr, new_amount);
+            remaining = checked_credits_sub(
+                remaining,
+                extra,
+                &format!("{context}: remaining after fee-target allocation"),
+            )?;
+        }
+    }
+
+    if remaining != 0 {
+        return Err(PlatformWalletError::AddressOperation(format!(
+            "{context}: cannot allocate exact total_output {}; {} credits remain after filling selected inputs to capacity",
+            total_output, remaining,
         )));
     }
 
@@ -854,6 +885,20 @@ fn checked_credits_sub(
     context: &str,
 ) -> Result<Credits, PlatformWalletError> {
     a.checked_sub(b)
+        .ok_or_else(|| PlatformWalletError::ArithmeticOverflow {
+            context: context.to_string(),
+        })
+}
+
+/// Checked multiply of two `Credits` values. Mirrors the other helpers:
+/// overflow is defensive-only but still reported with call-site context.
+#[inline]
+fn checked_credits_mul(
+    a: Credits,
+    b: Credits,
+    context: &str,
+) -> Result<Credits, PlatformWalletError> {
+    a.checked_mul(b)
         .ok_or_else(|| PlatformWalletError::ArithmeticOverflow {
             context: context.to_string(),
         })
@@ -1333,94 +1378,54 @@ mod auto_select_tests {
         }
     }
 
-    /// Tail entry's tentative consumption falls below `min_input_amount`.
-    /// The selector must fold the residue back into the fee target
-    /// (so every shipped input ≥ `min_input_amount`) — never silently
-    /// ship a sub-minimum input that `validate_structure` would reject
-    /// with `InputBelowMinimumError`.
-    ///
-    /// Production callers filter sub-minimum candidates upstream in
-    /// `auto_select_inputs`; this test feeds the helper directly to
-    /// exercise its in-helper redistribution path. The fixture is
-    /// engineered so the Ok branch is reachable: with
-    /// `input_cost=500_000`, `output_cost=6_000_000` the static fee is
-    /// `500_000*N + 6_000_000*max(M,1)`, and the chosen balances make
-    /// Phase 1 grow the prefix to [x,y,z] before Phase 3 finds
-    /// headroom.
+    /// Regression for the old Phase 4 greedy allocation: if the fee
+    /// target can consume exactly `min_input_amount` and the remaining
+    /// output must be split across two peers, the selector must not
+    /// greedily overfill the first peer and then fold a sub-minimum tail
+    /// back into the fee target.
     #[test]
-    fn non_fee_target_below_min_input_redistributes() {
+    fn deduct_from_input_redistributes_across_peers_before_fee_target() {
         let addr_x = p2pkh(0x01); // lex-smallest → fee target
-        let addr_y = p2pkh(0x02); // sub-min peer; folds into fee target
-        let addr_z = p2pkh(0x03); // large peer; absorbs the bulk
+        let addr_y = p2pkh(0x02);
+        let addr_z = p2pkh(0x03);
         let target = p2pkh(0x99);
         let pv = LATEST_PLATFORM_VERSION;
         let min_input = pv.dpp.state_transitions.address_funds.min_input_amount;
-
-        // Engineered fixture (numbers chosen against fee schedule
-        // `500_000 * N + 6_000_000`):
-        // - prefix [x] (acc 10M) doesn't cover required 10.5M (=4M+fee_1in).
-        // - prefix [x,y] (acc 10.08M) doesn't cover 11M (=4M+fee_2in).
-        // - prefix [x,y,z] (acc 12.08M) covers 11.5M (=4M+fee_3in).
-        //   fee_target_max(x) = 10M-7.5M = 2.5M;
-        //   fee_target_min = max(100k, 4M-2.08M) = 1.92M;
-        //   1.92M ≤ 2.5M → Phase 3 succeeds.
-        // - Phase 4: fee_target_consumed=1.92M, remaining=2.08M;
-        //   y's tentative=80k folds (residue=80k); z's tentative=2M
-        //   selected; new_consumed=2M ≤ fee_target_max ✓.
-        let total_output = 4_000_000u64;
-        let addr_x_balance = 10_000_000u64;
-        let addr_y_balance = 80_000u64; // below min_input_amount (100_000)
-        let addr_z_balance = 2_000_000u64;
+        let min_output = pv.dpp.state_transitions.address_funds.min_output_amount;
+        let fee_strategy = vec![AddressFundsFeeStrategyStep::DeductFromInput(0)];
+        let total_output = min_output.max(3 * min_input);
         let outputs = outputs_for(target, total_output);
+        let estimated_fee =
+            PlatformAddressWallet::estimate_fee_for_inputs(3, 1, &fee_strategy, &outputs, pv);
+        let addr_x_balance = estimated_fee + min_input;
+        let addr_y_balance = total_output - (2 * min_input);
+        let addr_z_balance = min_input;
         let candidates = vec![
-            (addr_x, addr_x_balance),
             (addr_y, addr_y_balance),
             (addr_z, addr_z_balance),
+            (addr_x, addr_x_balance),
         ];
-        let fee_strategy = vec![AddressFundsFeeStrategyStep::DeductFromInput(0)];
 
         let selected =
             select_inputs_deduct_from_input(candidates, &outputs, total_output, &fee_strategy, pv)
-                .expect("redistribute path must reach Ok with engineered fixture");
+                .expect(
+                    "allocation should split across peers before consuming extra from fee target",
+                );
 
-        // (1) Every selected input satisfies the per-input minimum
-        //     (the redistribute path's invariant — sub-min y must NOT
-        //     appear in `selected`).
-        for (addr, amount) in selected.iter() {
-            assert!(
-                *amount >= min_input,
-                "input {} consumes {} which is below min_input_amount {}",
-                format_address(addr),
-                amount,
-                min_input,
-            );
-        }
-
-        // (2) Sub-min y was folded — must not be in the inputs map.
-        assert!(
-            !selected.contains_key(&addr_y),
-            "sub-min addr_y must not appear as an input; expected fold into fee target"
-        );
-
-        // (3) Σ inputs == Σ outputs.
-        let input_sum: Credits = selected.values().sum();
-        assert_eq!(input_sum, total_output);
-
-        // (4) Fee target (lex-smallest x) absorbed the y residue —
-        //     selected[x] = fee_target_min + addr_y_balance.
-        let expected_fee_target_min = total_output - addr_y_balance - addr_z_balance;
+        assert_eq!(selected.get(&addr_x), Some(&min_input));
         assert_eq!(
-            selected.get(&addr_x),
-            Some(&(expected_fee_target_min + addr_y_balance)),
-            "fee target must consume fee_target_min plus the folded y residue"
+            selected.get(&addr_y),
+            Some(&(total_output - (2 * min_input)))
         );
+        assert_eq!(selected.get(&addr_z), Some(&min_input));
+        assert_eq!(selected.values().sum::<Credits>(), total_output);
+        assert_eq!(selected.keys().next(), Some(&addr_x));
         assert_eq!(
-            selected.get(&addr_z),
-            Some(&addr_z_balance),
-            "z absorbs its full balance as a non-fee-target peer"
+            addr_x_balance - selected[&addr_x],
+            estimated_fee,
+            "fee target should be consumed exactly to its maximum legal amount"
         );
 
-        // (5) Structural validation against dpp.
         assert_selection_validates(&selected, &outputs, fee_strategy, pv);
     }
 
@@ -1711,14 +1716,12 @@ mod auto_select_tests {
         );
     }
 
-    /// At least one funded non-output candidate exists → detector
-    /// returns `None`, letting the regular candidate path proceed.
-    /// (Belt-and-braces: in production this branch is unreachable
-    /// because `auto_select_inputs` only consults the detector when
-    /// `build_auto_select_candidates` returned empty — but the helper
-    /// must still behave correctly when called in isolation.)
+    /// The detector helper is only valid when `candidates.is_empty()`.
+    /// If it is called in isolation while a funded non-output address
+    /// still exists, it still reports the funded output payload rather
+    /// than returning `None`.
     #[test]
-    fn detect_only_output_addresses_funded_returns_none_when_non_output_funded() {
+    fn detect_only_output_addresses_funded_reports_output_payload_on_contract_violation() {
         let pv = LATEST_PLATFORM_VERSION;
         let min_input = pv.dpp.state_transitions.address_funds.min_input_amount;
 
@@ -1727,16 +1730,6 @@ mod auto_select_tests {
         let outputs = outputs_for(addr_out, min_input);
         let address_balances = [(addr_out, min_input * 5), (addr_in, min_input * 3)];
 
-        // Both funded; addr_out IS an output, addr_in is NOT. The
-        // helper still scans for funded outputs and would produce a
-        // typed error — but the production flow only calls this when
-        // candidates is empty, which requires no funded non-output
-        // candidates to exist. Calling here with a funded non-output
-        // is a contract violation by the caller; the helper still
-        // returns the typed error because both filters look only at
-        // the outputs side. Document that the contract is "call only
-        // when candidates.is_empty()" by asserting the typed-error
-        // result with the funded output payload.
         let err = detect_only_output_addresses_funded(
             address_balances.iter().copied(),
             &outputs,
@@ -1751,7 +1744,49 @@ mod auto_select_tests {
         }
     }
 
-    /// `checked_credits_add` / `checked_credits_sub` happy path returns
+    /// Regression for the allocation path used by `ReduceOutput(0)`:
+    /// when the last prefix entry would end below `min_input_amount`,
+    /// the trim must be spread across multiple earlier inputs instead
+    /// of requiring one donor to cover the whole top-up.
+    #[test]
+    fn reduce_output_prefix_allocation_spreads_trim_across_multiple_inputs() {
+        let pv = LATEST_PLATFORM_VERSION;
+        let min_input = pv.dpp.state_transitions.address_funds.min_input_amount;
+        let delta = min_input / 10;
+
+        let addr_a = p2pkh(0x01);
+        let addr_b = p2pkh(0x02);
+        let addr_c = p2pkh(0x03);
+        let addr_d = p2pkh(0x04);
+        let addr_e = p2pkh(0x05);
+        let prefix = vec![
+            (addr_a, min_input + delta),
+            (addr_b, min_input + delta),
+            (addr_c, min_input + delta),
+            (addr_d, min_input + delta),
+            (addr_e, min_input + delta),
+        ];
+
+        let total_output = 5 * min_input;
+        let selected = allocate_prefix_consumptions(
+            &prefix,
+            total_output,
+            min_input,
+            None,
+            "reduce_output_test",
+        )
+        .expect("allocation should spread the trim across the whole prefix");
+
+        assert_eq!(selected.len(), 5);
+        assert_eq!(selected.get(&addr_a), Some(&min_input));
+        assert_eq!(selected.get(&addr_b), Some(&min_input));
+        assert_eq!(selected.get(&addr_c), Some(&min_input));
+        assert_eq!(selected.get(&addr_d), Some(&min_input));
+        assert_eq!(selected.get(&addr_e), Some(&min_input));
+        assert_eq!(selected.values().sum::<Credits>(), total_output);
+    }
+
+    /// `checked_credits_add` / `checked_credits_sub` / `checked_credits_mul` happy path returns
     /// the wrapped sum/difference; the overflow path produces a typed
     /// `ArithmeticOverflow` carrying the supplied call-site context so
     /// downstream observers can pinpoint where the overflow happened.
@@ -1759,6 +1794,7 @@ mod auto_select_tests {
     fn checked_credits_helpers_typed_errors() {
         assert_eq!(checked_credits_add(2, 3, "ctx").unwrap(), 5);
         assert_eq!(checked_credits_sub(5, 3, "ctx").unwrap(), 2);
+        assert_eq!(checked_credits_mul(2, 3, "ctx").unwrap(), 6);
 
         let add_err = checked_credits_add(u64::MAX, 1, "add-site")
             .expect_err("expected ArithmeticOverflow on add");
@@ -1778,6 +1814,18 @@ mod auto_select_tests {
             PlatformWalletError::ArithmeticOverflow { context } => {
                 assert!(
                     context.contains("sub-site"),
+                    "unexpected context: {context}"
+                );
+            }
+            other => panic!("expected ArithmeticOverflow, got {other:?}"),
+        }
+
+        let mul_err = checked_credits_mul(u64::MAX, 2, "mul-site")
+            .expect_err("expected ArithmeticOverflow on mul");
+        match mul_err {
+            PlatformWalletError::ArithmeticOverflow { context } => {
+                assert!(
+                    context.contains("mul-site"),
                     "unexpected context: {context}"
                 );
             }
