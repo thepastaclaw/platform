@@ -156,7 +156,16 @@ impl<T> From<Option<T>> for PlatformWalletFFIResult {
 
 impl From<PlatformWalletError> for PlatformWalletFFIResult {
     fn from(error: PlatformWalletError) -> Self {
-        PlatformWalletFFIResult::err(PlatformWalletFFIResultCode::ErrorUnknown, error.to_string())
+        let code = match &error {
+            PlatformWalletError::IdentityNotFound(_) | PlatformWalletError::NoPrimaryIdentity => {
+                PlatformWalletFFIResultCode::ErrorIdentityNotFound
+            }
+            PlatformWalletError::ContactRequestNotFound(_) => {
+                PlatformWalletFFIResultCode::ErrorContactNotFound
+            }
+            _ => PlatformWalletFFIResultCode::ErrorWalletOperation,
+        };
+        PlatformWalletFFIResult::err(code, error.to_string())
     }
 }
 
@@ -375,5 +384,26 @@ mod tests {
             "before\0after",
         );
         assert!(!r.message.is_null());
+    }
+
+    #[test]
+    fn wallet_errors_map_to_wallet_operation() {
+        use dashcore::hashes::Hash as _;
+        use dashcore::{OutPoint, Txid};
+        use key_wallet::account::StandardAccountType;
+
+        let no_spendable = PlatformWalletError::NoSpendableInputs {
+            account_type: StandardAccountType::BIP44Account,
+            account_index: 0,
+            context: "reserved".to_string(),
+        };
+        let r: PlatformWalletFFIResult = no_spendable.into();
+        assert_eq!(r.code, PlatformWalletFFIResultCode::ErrorWalletOperation);
+
+        let conflict = PlatformWalletError::ConcurrentSpendConflict {
+            selected: vec![OutPoint::new(Txid::from_byte_array([1; 32]), 0)],
+        };
+        let r: PlatformWalletFFIResult = conflict.into();
+        assert_eq!(r.code, PlatformWalletFFIResultCode::ErrorWalletOperation);
     }
 }

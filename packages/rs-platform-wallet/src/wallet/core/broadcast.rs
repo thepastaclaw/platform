@@ -3,11 +3,65 @@ use std::collections::BTreeSet;
 use dashcore::{Address as DashAddress, OutPoint, Transaction};
 use key_wallet::account::account_type::StandardAccountType;
 use key_wallet::managed_account::managed_account_trait::ManagedAccountTrait;
+use key_wallet::managed_account::managed_account_type::ManagedAccountType;
 use key_wallet::transaction_checking::{TransactionContext, WalletTransactionChecker};
 use key_wallet::wallet::managed_wallet_info::wallet_info_interface::WalletInfoInterface;
 
 use crate::broadcaster::TransactionBroadcaster;
 use crate::{CoreWallet, PlatformWalletError};
+
+fn reserve_standard_change_address<A: ManagedAccountTrait>(
+    managed_account: &mut A,
+    address: &DashAddress,
+) -> Result<(), PlatformWalletError> {
+    let reserved = match managed_account.managed_account_type_mut() {
+        ManagedAccountType::Standard {
+            internal_addresses, ..
+        } => internal_addresses.mark_used(address),
+        _ => false,
+    };
+
+    if reserved {
+        managed_account.bump_monitor_revision();
+        Ok(())
+    } else {
+        Err(PlatformWalletError::TransactionBuild(
+            "failed to reserve selected change address".to_string(),
+        ))
+    }
+}
+
+fn rollback_standard_change_address_reservation<A: ManagedAccountTrait>(
+    managed_account: &mut A,
+    address: &DashAddress,
+) {
+    let rolled_back = match managed_account.managed_account_type_mut() {
+        ManagedAccountType::Standard {
+            internal_addresses, ..
+        } => {
+            let Some(index) = internal_addresses.address_index.get(address).copied() else {
+                return;
+            };
+            let Some(info) = internal_addresses.addresses.get_mut(&index) else {
+                return;
+            };
+            if !info.used {
+                return;
+            }
+
+            info.used = false;
+            info.used_at = None;
+            internal_addresses.used_indices.remove(&index);
+            internal_addresses.highest_used = internal_addresses.used_indices.iter().copied().max();
+            true
+        }
+        _ => false,
+    };
+
+    if rolled_back {
+        managed_account.bump_monitor_revision();
+    }
+}
 
 impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
     /// Broadcast a signed transaction to the network.
@@ -49,7 +103,7 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             ));
         }
 
-        let (tx, xpub, _reservation) = {
+        let (tx, change_addr, _reservation) = {
             let mut wm = self.wallet_manager.write().await;
             let (wallet, info) = wm.get_wallet_and_info_mut(&self.wallet_id).ok_or_else(|| {
                 crate::error::PlatformWalletError::WalletNotFound(
@@ -112,49 +166,65 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             // a concurrent `send_to_addresses` on this handle. Single lock
             // acquisition for the whole filter pass.
             let reserved = self.reservations.snapshot();
-            let spendable: Vec<_> = managed_account
+            let all_spendable: Vec<_> = managed_account
                 .spendable_utxos(current_height)
                 .into_iter()
+                .cloned()
+                .collect();
+            let spendable: Vec<_> = all_spendable
+                .iter()
                 .filter(|utxo| !reserved.contains(&utxo.outpoint))
                 .cloned()
                 .collect();
 
             if spendable.is_empty() {
+                if all_spendable.is_empty() {
+                    return Err(PlatformWalletError::TransactionBuild(format!(
+                        "no spendable UTXOs available on {account_type:?} account {account_index}"
+                    )));
+                }
+
                 return Err(PlatformWalletError::NoSpendableInputs {
                     account_index,
                     account_type,
-                    context: "all UTXOs used or reserved by in-flight transactions".to_string(),
+                    context: "all spendable UTXOs are reserved by in-flight transactions"
+                        .to_string(),
                 });
             }
 
-            // Peek at the next change address without advancing the derivation
-            // index. We commit the advance only after post-build revalidation
-            // succeeds, so a revalidation failure does not burn an index and
-            // widen the gap-limit window on retry.
+            // Generate and reserve the selected change address before releasing
+            // the wallet lock. `next_change_address(..., true)` ensures the
+            // address is present in the internal pool; marking it used makes
+            // concurrent builders skip it. Pre-broadcast failures roll this
+            // reservation back below so retry does not burn a gap slot.
             let change_addr = managed_account
-                .next_change_address(Some(&xpub), false)
+                .next_change_address(Some(&xpub), true)
                 .map_err(|e| PlatformWalletError::TransactionBuild(e.to_string()))?;
+            reserve_standard_change_address(managed_account, &change_addr)?;
 
             let mut builder = TransactionBuilder::new()
                 .set_current_height(current_height)
                 .set_selection_strategy(SelectionStrategy::LargestFirst)
-                .set_change_address(change_addr)
+                .set_change_address(change_addr.clone())
                 .add_inputs(spendable.iter().cloned());
             for (addr, amount) in &outputs {
                 builder = builder.add_output(addr, *amount);
             }
 
-            let (tx, _fee) = builder
+            let build_result = builder
                 .build_signed(wallet, |addr| {
                     managed_account.address_derivation_path(&addr)
                 })
                 .await
                 .map_err(|e| {
-                    // Map coin-selection failures to `NoSpendableInputs`. The string-match is
-                    // brittle against upstream rephrasing and is currently unpinned by tests.
-                    // TODO(typed-wrapper): drop once upstream exposes `SelectionError` typed via BuilderError.
+                    // Map only empty-input coin-selection failures to `NoSpendableInputs`.
+                    // Ordinary insufficient funds must remain a transaction-build error so
+                    // callers can distinguish "needs more funds" from "retry after an
+                    // in-flight reservation clears".
+                    // TODO(typed-wrapper): drop string matching once upstream exposes
+                    // `SelectionError` typed via BuilderError.
                     let msg = e.to_string();
-                    if msg.contains("Insufficient funds") || msg.contains("No UTXOs available") {
+                    if msg.contains("No UTXOs available") {
                         PlatformWalletError::NoSpendableInputs {
                             account_type,
                             account_index,
@@ -163,7 +233,14 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
                     } else {
                         PlatformWalletError::TransactionBuild(msg)
                     }
-                })?;
+                });
+            let (tx, _fee) = match build_result {
+                Ok(built) => built,
+                Err(e) => {
+                    rollback_standard_change_address_reservation(managed_account, &change_addr);
+                    return Err(e);
+                }
+            };
 
             // Defense-in-depth: unreachable under normal builder contract but guards against
             // a future regression where coin selection picks an outpoint outside `spendable`.
@@ -174,6 +251,7 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             if !selected.is_subset(&spendable_outpoints) {
                 // Typed retryable variant: forward-compatible with cross-process
                 // concurrent-spend surfacing; today only a builder regression hits it.
+                rollback_standard_change_address_reservation(managed_account, &change_addr);
                 return Err(PlatformWalletError::ConcurrentSpendConflict {
                     selected: selected.into_iter().collect(),
                 });
@@ -196,6 +274,7 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
                     .difference(&fresh_spendable_outpoints)
                     .copied()
                     .collect();
+                rollback_standard_change_address_reservation(managed_account, &change_addr);
                 return Err(PlatformWalletError::ConcurrentSpendConflict { selected: missing });
             }
 
@@ -204,22 +283,15 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
             // (success) or the error unwinds (failure → outpoints released for retry).
             let reservation = self.reservations.reserve(selected.into_iter().collect());
 
-            (tx, xpub, reservation)
+            (tx, change_addr, reservation)
         };
 
         // Broadcast first — on error we leave wallet state untouched so the caller can retry.
         // If the network accepted but the call errored (ambiguous outcome), a retry will be
         // rejected as a duplicate spend rather than us marking UTXOs spent prematurely.
-        self.broadcast_transaction(&tx).await?;
-
-        // Mark inputs spent under the write lock, transitioning them from "reserved" to "spent"
-        // before the reservation guard drops — no observable gap for concurrent callers.
-        // Warning paths below do NOT return Err: the network already accepted the tx.
-        {
+        if let Err(e) = self.broadcast_transaction(&tx).await {
             let mut wm = self.wallet_manager.write().await;
-            if let Some((wallet, info)) = wm.get_wallet_mut_and_info_mut(&self.wallet_id) {
-                // Commit the change-address advance post-broadcast; doing it before would burn
-                // a derivation index on network rejection, widening the gap-limit window.
+            if let Some((_wallet, info)) = wm.get_wallet_mut_and_info_mut(&self.wallet_id) {
                 let change_account = match account_type {
                     StandardAccountType::BIP44Account => info
                         .core_wallet
@@ -233,21 +305,18 @@ impl<B: TransactionBroadcaster + ?Sized> CoreWallet<B> {
                         .get_mut(&account_index),
                 };
                 if let Some(change_account) = change_account {
-                    if let Err(e) = change_account.next_change_address(Some(&xpub), true) {
-                        // Broadcast already succeeded; surface as a warning
-                        // rather than an error so the caller still sees the
-                        // tx hash. A later sync reconciles the index.
-                        tracing::warn!(
-                            target: "platform_wallet::broadcast",
-                            event = "post_broadcast_change_index_advance_failed",
-                            txid = %tx.txid(),
-                            wallet_id = %hex::encode(self.wallet_id),
-                            error = %e,
-                            "failed to advance change-address index after successful broadcast"
-                        );
-                    }
+                    rollback_standard_change_address_reservation(change_account, &change_addr);
                 }
+            }
+            return Err(e);
+        }
 
+        // Mark inputs spent under the write lock, transitioning them from "reserved" to "spent"
+        // before the reservation guard drops — no observable gap for concurrent callers.
+        // Warning paths below do NOT return Err: the network already accepted the tx.
+        {
+            let mut wm = self.wallet_manager.write().await;
+            if let Some((wallet, info)) = wm.get_wallet_mut_and_info_mut(&self.wallet_id) {
                 let check_result = info
                     .check_core_transaction(&tx, TransactionContext::Mempool, wallet, true, true)
                     .await;
@@ -667,9 +736,8 @@ mod tests {
 
         let outputs = vec![(recipient.clone(), 100_000)];
 
-        // First call fails at the broadcast step → guard drops →
-        // reservation released. The change-address index is also rolled
-        // back by virtue of #3585's peek-then-commit pattern.
+        // First call fails at the broadcast step → guards drop/rollback →
+        // UTXO and change-address reservations are released for retry.
         let first = core
             .send_to_addresses(StandardAccountType::BIP44Account, 0, outputs.clone())
             .await;
@@ -727,5 +795,30 @@ mod tests {
             matches!(result, Err(PlatformWalletError::NoSpendableInputs { .. })),
             "send_to_addresses must map a fully-reserved wallet to NoSpendableInputs; got: {result:?}"
         );
+    }
+
+    /// Insufficient funds are a funding error, not the reservation-only
+    /// `NoSpendableInputs` retry signal.
+    #[tokio::test]
+    async fn insufficient_funds_are_not_no_spendable_inputs() {
+        use key_wallet::account::account_type::StandardAccountType;
+
+        let (wm, wallet_id, recipient) = build_funded_wallet_manager(2_000_000);
+        let broadcaster: Arc<dyn TransactionBroadcaster> = Arc::new(FailingBroadcaster);
+        let core = make_core_wallet_for_manager(wm, wallet_id, broadcaster);
+
+        let outputs = vec![(recipient.clone(), 200_000_000)];
+
+        let result = core
+            .send_to_addresses(StandardAccountType::BIP44Account, 0, outputs)
+            .await;
+
+        match result {
+            Err(PlatformWalletError::TransactionBuild(_)) => {}
+            Err(PlatformWalletError::NoSpendableInputs { .. }) => {
+                panic!("insufficient funds must not be flattened to NoSpendableInputs")
+            }
+            other => panic!("expected TransactionBuild for insufficient funds; got {other:?}"),
+        }
     }
 }
