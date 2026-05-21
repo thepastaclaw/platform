@@ -833,11 +833,11 @@ async fn apply_block_changes<'a, P, I>(
 }
 
 /// End-of-pass recovery for addresses missing from the entry-time
-/// snapshot. Re-polls `pending_addresses()` exactly once, builds a small
-/// `extras` map of newly-derived addresses, and replays only the buffered
-/// changes that match an `extras` entry. Foreign (other-wallet) addresses
-/// fall out at the intersection check — no provider refresh storm, no
-/// log flood.
+/// snapshot. Re-polls `pending_addresses()` after each successful replay
+/// wave, builds a small `extras` map of newly-derived addresses, and
+/// replays only the buffered changes that match an `extras` entry.
+/// Foreign (other-wallet) addresses fall out at the intersection check
+/// — no provider refresh storm during the forward pass, no log flood.
 async fn refresh_and_replay_unknown<P: AddressProvider>(
     key_to_tag: &HashMap<Vec<u8>, (P::Tag, P::Address)>,
     pending_unknown: Vec<PendingUnknownChange>,
@@ -848,81 +848,94 @@ async fn refresh_and_replay_unknown<P: AddressProvider>(
         return;
     }
 
-    // Build the set of unknown keys for a fast intersection probe.
-    let unknown_keys: std::collections::HashSet<&[u8]> =
-        pending_unknown.iter().map(|p| p.key.as_slice()).collect();
+    let mut pending_unknown = pending_unknown;
 
-    // Only addresses the provider can now produce AND that match a
-    // buffered miss are interesting — everything else is some other
-    // wallet's address and stays out of the lookup entirely.
-    let mut extras: HashMap<Vec<u8>, (P::Tag, P::Address)> = HashMap::new();
-    for (tag, address) in provider.pending_addresses() {
-        let bytes = address.to_bytes();
-        if unknown_keys.contains(bytes.as_slice()) && !key_to_tag.contains_key(&bytes) {
-            extras.insert(bytes, (tag, address));
+    loop {
+        // Build the set of still-buffered unknown keys for a fast
+        // intersection probe.
+        let unknown_keys: std::collections::HashSet<&[u8]> =
+            pending_unknown.iter().map(|p| p.key.as_slice()).collect();
+
+        // Only addresses the provider can now produce AND that match a
+        // buffered miss are interesting — everything else is some other
+        // wallet's address and stays out of the lookup entirely.
+        let mut extras: HashMap<Vec<u8>, (P::Tag, P::Address)> = HashMap::new();
+        for (tag, address) in provider.pending_addresses() {
+            let bytes = address.to_bytes();
+            if unknown_keys.contains(bytes.as_slice()) && !key_to_tag.contains_key(&bytes) {
+                extras.insert(bytes, (tag, address));
+            }
         }
-    }
 
-    if extras.is_empty() {
-        // Common case on a populated multi-wallet chain: every buffered
-        // unknown belongs to another wallet.
-        debug!(
-            "Address sync: {} platform-reported balance change(s) reference \
-             address(es) not tracked by this wallet; ignoring",
-            pending_unknown.len()
-        );
-        return;
-    }
+        if extras.is_empty() {
+            // Common case on a populated multi-wallet chain: every
+            // remaining buffered unknown belongs to another wallet.
+            debug!(
+                "Address sync: {} platform-reported balance change(s) reference \
+                 address(es) not tracked by this wallet; ignoring",
+                pending_unknown.len()
+            );
+            return;
+        }
 
-    // Replay only the entries whose key actually resolves in `extras`.
-    // Order is preserved (compacted first, then recent — same as the
-    // forward pass), so `AddToCredits` deltas accumulate correctly. The
-    // catch-up cursor per change is preserved so the compacted height
-    // filter still sees the same `current_height` it would have seen on
-    // the forward pass.
-    let mut replay_applied: Vec<(P::Tag, P::Address, AddressFunds)> = Vec::new();
-    let mut still_unknown: usize = 0;
-    for pending in &pending_unknown {
-        let Some(&(tag, address)) = extras.get(pending.key.as_slice()) else {
-            still_unknown += 1;
-            continue;
-        };
-        let result_key = (tag, address);
-        let current_balance = result
-            .found
-            .get(&result_key)
-            .map(|f| f.balance)
-            .unwrap_or(0);
-        let new_balance = pending
-            .change
-            .as_borrowed()
-            .new_balance(current_balance, pending.current_height);
-
-        if new_balance != current_balance {
-            // TODO: same synthesized nonce=0 gap as the forward pass.
-            let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
-            let funds = AddressFunds {
-                nonce,
-                balance: new_balance,
+        // Replay only the entries whose key actually resolves in
+        // `extras`. Order is preserved (compacted first, then recent —
+        // same as the forward pass), so `AddToCredits` deltas
+        // accumulate correctly. The catch-up cursor per change is
+        // preserved so the compacted height filter still sees the same
+        // `current_height` it would have seen on the forward pass.
+        let mut replay_applied: Vec<(P::Tag, P::Address, AddressFunds)> = Vec::new();
+        let mut replayed_count: usize = 0;
+        let mut still_unknown: Vec<PendingUnknownChange> = Vec::new();
+        for pending in pending_unknown {
+            let Some(&(tag, address)) = extras.get(pending.key.as_slice()) else {
+                still_unknown.push(pending);
+                continue;
             };
-            result.absent.remove(&result_key);
-            result.found.insert(result_key, funds);
-            replay_applied.push((tag, address, funds));
+            replayed_count += 1;
+
+            let result_key = (tag, address);
+            let current_balance = result
+                .found
+                .get(&result_key)
+                .map(|f| f.balance)
+                .unwrap_or(0);
+            let new_balance = pending
+                .change
+                .as_borrowed()
+                .new_balance(current_balance, pending.current_height);
+
+            if new_balance != current_balance {
+                // TODO: same synthesized nonce=0 gap as the forward pass.
+                let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
+                let funds = AddressFunds {
+                    nonce,
+                    balance: new_balance,
+                };
+                result.absent.remove(&result_key);
+                result.found.insert(result_key, funds);
+                replay_applied.push((tag, address, funds));
+            }
         }
-    }
 
-    for (tag, address, funds) in &replay_applied {
-        provider.on_address_found(*tag, address, *funds).await;
-    }
+        if replayed_count == 0 {
+            debug!(
+                "Address sync: replay refresh made no progress across {} buffered \
+                 change(s); stopping to avoid livelock",
+                still_unknown.len()
+            );
+            return;
+        }
 
-    if still_unknown > 0 {
-        debug!(
-            "Address sync: {} platform-reported balance change(s) reference \
-             address(es) not tracked by this wallet (refresh recovered {} \
-             other(s)); ignoring the untracked entries",
-            still_unknown,
-            replay_applied.len()
-        );
+        for (tag, address, funds) in &replay_applied {
+            provider.on_address_found(*tag, address, *funds).await;
+        }
+
+        if still_unknown.is_empty() {
+            return;
+        }
+
+        pending_unknown = still_unknown;
     }
 }
 
@@ -1682,6 +1695,124 @@ mod tests {
                 .iter()
                 .any(|(t, a, f)| *t == 7 && *a == late && f.balance == 42_000),
             "on_address_found must fire for the recovered post-snapshot address"
+        );
+    }
+
+    /// A post-snapshot address recovered during the first replay wave
+    /// may derive another pending address; the replay loop must refresh
+    /// and apply that second wave before returning.
+    #[tokio::test]
+    async fn refresh_and_replay_unknown_recovers_chained_post_snapshot_address() {
+        use async_trait::async_trait;
+
+        struct ChainedProvider {
+            first: PlatformAddress,
+            second: PlatformAddress,
+            phase: u8,
+            pending_polls: std::sync::atomic::AtomicUsize,
+            found: Vec<(u32, PlatformAddress, AddressFunds)>,
+        }
+
+        #[async_trait]
+        impl AddressProvider for ChainedProvider {
+            type Tag = u32;
+            type Address = PlatformAddress;
+
+            fn gap_limit(&self) -> AddressIndex {
+                0
+            }
+
+            fn pending_addresses(&self) -> impl Iterator<Item = (Self::Tag, Self::Address)> + '_ {
+                self.pending_polls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut pending = vec![(11u32, self.first)];
+                if self.phase > 0 {
+                    pending.push((12u32, self.second));
+                }
+                pending.into_iter()
+            }
+
+            async fn on_address_found(
+                &mut self,
+                tag: Self::Tag,
+                address: &Self::Address,
+                funds: AddressFunds,
+            ) {
+                if *address == self.first {
+                    self.phase = 1;
+                }
+                self.found.push((tag, *address, funds));
+            }
+
+            async fn on_address_absent(&mut self, _tag: Self::Tag, _address: &Self::Address) {}
+
+            fn current_balances(
+                &self,
+            ) -> impl Iterator<Item = (Self::Tag, Self::Address, AddressFunds)> + '_ {
+                std::iter::empty()
+            }
+        }
+
+        let first = p2pkh(0x31);
+        let second = p2pkh(0x32);
+
+        let lookup: HashMap<Vec<u8>, (u32, PlatformAddress)> = HashMap::new();
+        let mut provider = ChainedProvider {
+            first,
+            second,
+            phase: 0,
+            pending_polls: std::sync::atomic::AtomicUsize::new(0),
+            found: Vec::new(),
+        };
+        let mut result: AddressSyncResult<u32, PlatformAddress> = AddressSyncResult::new();
+        let mut pending_unknown: Vec<PendingUnknownChange> = Vec::new();
+
+        let first_op = BlockAwareCreditOperation::SetCredits(1_111);
+        let second_op = BlockAwareCreditOperation::SetCredits(2_222);
+        let changes = [
+            (&first, AddressBalanceChange::Compacted(&first_op)),
+            (&second, AddressBalanceChange::Compacted(&second_op)),
+        ];
+
+        apply_block_changes(
+            &lookup,
+            changes.iter().map(|(a, c)| (*a, *c)),
+            0,
+            &mut provider,
+            &mut result,
+            &mut pending_unknown,
+        )
+        .await;
+
+        assert_eq!(pending_unknown.len(), 2, "both misses buffer pre-refresh");
+
+        refresh_and_replay_unknown(&lookup, pending_unknown, &mut provider, &mut result).await;
+
+        assert_eq!(
+            result.found.get(&(11u32, first)).map(|f| f.balance),
+            Some(1_111),
+            "first replay wave must recover the initially derivable address"
+        );
+        assert_eq!(
+            result.found.get(&(12u32, second)).map(|f| f.balance),
+            Some(2_222),
+            "second replay wave must recover the address derived by on_address_found"
+        );
+        assert_eq!(
+            provider
+                .found
+                .iter()
+                .map(|(tag, address, funds)| (*tag, *address, funds.balance))
+                .collect::<Vec<_>>(),
+            vec![(11u32, first, 1_111), (12u32, second, 2_222)],
+            "recovered addresses must replay in original order across waves"
+        );
+        assert_eq!(
+            provider
+                .pending_polls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "chained recovery should require exactly two end-of-pass refresh polls"
         );
     }
 
