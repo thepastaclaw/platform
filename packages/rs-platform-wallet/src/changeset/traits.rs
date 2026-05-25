@@ -151,6 +151,14 @@ pub trait PlatformWalletPersistence: Send + Sync {
     /// wallet attribution where needed.
     fn load(&self) -> Result<ClientStartState, PersistenceError>;
 
+    /// Delete all persisted state for `wallet_id`.
+    ///
+    /// Used by registration rollback when the durable write succeeded
+    /// but a later restore/initialization step failed. Implementations
+    /// should remove every artefact owned by that wallet so a retry can
+    /// safely re-register from scratch.
+    fn delete(&self, wallet_id: WalletId) -> Result<(), PersistenceError>;
+
     /// Look up a single core transaction record by `txid` for `wallet_id`.
     ///
     /// Used by the asset-lock proof flow to recover records that the

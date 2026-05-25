@@ -926,6 +926,7 @@ public class PlatformWalletPersistenceHandler {
         cb.context = contextPtr
         cb.on_changeset_begin_fn = changesetBeginCallback
         cb.on_changeset_end_fn = changesetEndCallback
+        cb.on_delete_wallet_fn = deleteWalletCallback
         cb.on_persist_address_balances_fn = persistAddressBalancesCallback
         cb.on_persist_wallet_changeset_fn = persistWalletChangesetCallback
         cb.on_persist_sync_state_fn = persistSyncStateCallback
@@ -4185,6 +4186,31 @@ private func changesetEndCallback(
     let walletId = Data(bytes: walletIdPtr, count: 32)
     handler.endChangeset(walletId: walletId, success: success)
     return 0
+}
+
+/// C shim for `on_delete_wallet_fn`. Forwards to
+/// `PlatformWalletPersistenceHandler.deleteWalletData(walletId:)` so
+/// Rust can compensate a partially committed registration by removing
+/// the durable wallet rows.
+private func deleteWalletCallback(
+    context: UnsafeMutableRawPointer?,
+    walletIdPtr: UnsafePointer<UInt8>?
+) -> Int32 {
+    guard let context = context,
+          let walletIdPtr = walletIdPtr else {
+        return 0
+    }
+    let handler = Unmanaged<PlatformWalletPersistenceHandler>
+        .fromOpaque(context)
+        .takeUnretainedValue()
+    let walletId = Data(bytes: walletIdPtr, count: 32)
+    do {
+        try handler.deleteWalletData(walletId: walletId)
+        return 0
+    } catch {
+        print("⚠️ deleteWalletCallback failed: \(error.localizedDescription)")
+        return -1
+    }
 }
 
 private func persistSyncStateCallback(

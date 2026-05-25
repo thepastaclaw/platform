@@ -321,6 +321,13 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
             Err(e) => {
                 let mut wm = self.wallet_manager.write().await;
                 let _ = wm.remove_wallet(&wallet_id);
+                drop(wm);
+                if let Err(delete_err) = self.persister.delete(wallet_id) {
+                    return Err(PlatformWalletError::WalletCreation(format!(
+                        "Failed to load persisted wallet state: {}; rollback delete failed: {}",
+                        e, delete_err
+                    )));
+                }
                 return Err(PlatformWalletError::WalletCreation(format!(
                     "Failed to load persisted wallet state: {}",
                     e
@@ -336,6 +343,13 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
             {
                 let mut wm = self.wallet_manager.write().await;
                 let _ = wm.remove_wallet(&wallet_id);
+                drop(wm);
+                if let Err(delete_err) = self.persister.delete(wallet_id) {
+                    return Err(PlatformWalletError::WalletCreation(format!(
+                        "Failed to restore persisted platform address state: {}; rollback delete failed: {}",
+                        e, delete_err
+                    )));
+                }
                 return Err(PlatformWalletError::WalletCreation(format!(
                     "Failed to restore persisted platform address state: {}",
                     e
@@ -429,5 +443,202 @@ impl<P: PlatformWalletPersistence + 'static> PlatformWalletManager<P> {
         }
 
         Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use bimap::BiBTreeMap;
+
+    use crate::changeset::{ClientStartState, PersistenceError};
+    use crate::events::{EventHandler, PlatformEventHandler};
+    use crate::wallet::platform_addresses::{
+        PerAccountPlatformAddressState, PerWalletPlatformAddressState,
+    };
+
+    #[derive(Clone, Copy)]
+    enum InjectedFailure {
+        None,
+        LoadPersisted,
+        InitializeFromPersisted,
+    }
+
+    struct FaultInjectingPersister {
+        state: Mutex<FaultInjectingPersisterState>,
+    }
+
+    struct FaultInjectingPersisterState {
+        failure: InjectedFailure,
+        stored: BTreeMap<WalletId, PlatformWalletChangeSet>,
+        delete_calls: usize,
+    }
+
+    impl FaultInjectingPersister {
+        fn new(failure: InjectedFailure) -> Self {
+            Self {
+                state: Mutex::new(FaultInjectingPersisterState {
+                    failure,
+                    stored: BTreeMap::new(),
+                    delete_calls: 0,
+                }),
+            }
+        }
+
+        fn set_failure(&self, failure: InjectedFailure) {
+            self.state.lock().unwrap().failure = failure;
+        }
+
+        fn persisted_wallet_count(&self) -> usize {
+            self.state.lock().unwrap().stored.len()
+        }
+
+        fn delete_calls(&self) -> usize {
+            self.state.lock().unwrap().delete_calls
+        }
+    }
+
+    impl PlatformWalletPersistence for FaultInjectingPersister {
+        fn store(
+            &self,
+            wallet_id: WalletId,
+            changeset: PlatformWalletChangeSet,
+        ) -> Result<(), PersistenceError> {
+            self.state
+                .lock()
+                .unwrap()
+                .stored
+                .insert(wallet_id, changeset);
+            Ok(())
+        }
+
+        fn flush(&self, _wallet_id: WalletId) -> Result<(), PersistenceError> {
+            Ok(())
+        }
+
+        fn load(&self) -> Result<ClientStartState, PersistenceError> {
+            let guard = self.state.lock().unwrap();
+            match guard.failure {
+                InjectedFailure::LoadPersisted => Err(PersistenceError::Backend(
+                    "injected load_persisted failure".into(),
+                )),
+                InjectedFailure::InitializeFromPersisted => {
+                    let mut platform_addresses = BTreeMap::new();
+                    for (wallet_id, changeset) in &guard.stored {
+                        let Some(account_xpub) = changeset
+                            .account_registrations
+                            .first()
+                            .map(|entry| entry.account_xpub)
+                        else {
+                            continue;
+                        };
+
+                        let mut per_account = PerWalletPlatformAddressState::new();
+                        per_account.insert(
+                            999,
+                            PerAccountPlatformAddressState::from_persisted(
+                                account_xpub,
+                                BiBTreeMap::new(),
+                                BTreeMap::new(),
+                            ),
+                        );
+
+                        platform_addresses.insert(
+                            *wallet_id,
+                            crate::PlatformAddressSyncStartState {
+                                per_account,
+                                sync_height: 0,
+                                sync_timestamp: 0,
+                                last_known_recent_block: 0,
+                            },
+                        );
+                    }
+
+                    Ok(ClientStartState {
+                        platform_addresses,
+                        ..ClientStartState::default()
+                    })
+                }
+                InjectedFailure::None => Ok(ClientStartState::default()),
+            }
+        }
+
+        fn delete(&self, wallet_id: WalletId) -> Result<(), PersistenceError> {
+            let mut guard = self.state.lock().unwrap();
+            guard.delete_calls += 1;
+            guard.stored.remove(&wallet_id);
+            Ok(())
+        }
+    }
+
+    struct NoopEventHandler;
+
+    impl EventHandler for NoopEventHandler {}
+    impl PlatformEventHandler for NoopEventHandler {}
+
+    fn make_manager(
+        failure: InjectedFailure,
+    ) -> (
+        Arc<PlatformWalletManager<FaultInjectingPersister>>,
+        Arc<FaultInjectingPersister>,
+    ) {
+        let sdk = Arc::new(dash_sdk::SdkBuilder::new_mock().build().expect("mock sdk"));
+        let persister = Arc::new(FaultInjectingPersister::new(failure));
+        let event_handler: Arc<dyn PlatformEventHandler> = Arc::new(NoopEventHandler);
+        (
+            Arc::new(PlatformWalletManager::new(
+                sdk,
+                Arc::clone(&persister),
+                event_handler,
+            )),
+            persister,
+        )
+    }
+
+    async fn assert_register_rollback_then_retry(failure: InjectedFailure) {
+        let (manager, persister) = make_manager(failure);
+        let seed = [7u8; 64];
+
+        let err = manager
+            .create_wallet_from_seed_bytes(
+                Network::Testnet,
+                seed,
+                WalletAccountCreationOptions::Default,
+                Some(0),
+            )
+            .await
+            .expect_err("registration should fail at injected restore site");
+        assert!(matches!(err, PlatformWalletError::WalletCreation(_)));
+        assert_eq!(persister.persisted_wallet_count(), 0);
+        assert_eq!(persister.delete_calls(), 1);
+
+        persister.set_failure(InjectedFailure::None);
+
+        manager
+            .create_wallet_from_seed_bytes(
+                Network::Testnet,
+                seed,
+                WalletAccountCreationOptions::Default,
+                Some(0),
+            )
+            .await
+            .expect("retry should succeed after rollback");
+        assert_eq!(persister.persisted_wallet_count(), 1);
+
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn register_wallet_rolls_back_persisted_record_when_load_persisted_fails() {
+        assert_register_rollback_then_retry(InjectedFailure::LoadPersisted).await;
+    }
+
+    #[tokio::test]
+    async fn register_wallet_rolls_back_persisted_record_when_initialize_from_persisted_fails() {
+        assert_register_rollback_then_retry(InjectedFailure::InitializeFromPersisted).await;
     }
 }

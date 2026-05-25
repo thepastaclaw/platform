@@ -88,6 +88,13 @@ impl PlatformWalletPersistence for RecordingPersister {
     fn load(&self) -> Result<ClientStartState, platform_wallet::changeset::PersistenceError> {
         Ok(ClientStartState::default())
     }
+
+    fn delete(
+        &self,
+        _wallet_id: WalletId,
+    ) -> Result<(), platform_wallet::changeset::PersistenceError> {
+        Ok(())
+    }
 }
 
 /// No-op event handler for tests.

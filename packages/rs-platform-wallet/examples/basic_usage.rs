@@ -37,6 +37,12 @@ impl PlatformWalletPersistence for NoopPersister {
     > {
         Ok(platform_wallet::changeset::ClientStartState::default())
     }
+    fn delete(
+        &self,
+        _wallet_id: platform_wallet::wallet::platform_wallet::WalletId,
+    ) -> Result<(), platform_wallet::changeset::PersistenceError> {
+        Ok(())
+    }
 }
 
 /// Minimal no-op event handler for the example.

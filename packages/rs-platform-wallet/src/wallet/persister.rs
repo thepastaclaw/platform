@@ -73,4 +73,8 @@ impl PlatformWalletPersistence for NoPlatformPersistence {
     fn load(&self) -> Result<ClientStartState, PersistenceError> {
         Ok(ClientStartState::default())
     }
+
+    fn delete(&self, _wallet_id: WalletId) -> Result<(), PersistenceError> {
+        Ok(())
+    }
 }

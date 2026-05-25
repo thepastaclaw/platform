@@ -616,6 +616,9 @@ mod tests {
         fn load(&self) -> Result<ClientStartState, PersistenceError> {
             Ok(ClientStartState::default())
         }
+        fn delete(&self, _wallet_id: WalletId) -> Result<(), PersistenceError> {
+            Ok(())
+        }
         fn get_core_tx_record(
             &self,
             _wallet_id: WalletId,
@@ -642,6 +645,9 @@ mod tests {
         }
         fn load(&self) -> Result<ClientStartState, PersistenceError> {
             Ok(ClientStartState::default())
+        }
+        fn delete(&self, _wallet_id: WalletId) -> Result<(), PersistenceError> {
+            Ok(())
         }
         fn get_core_tx_record(
             &self,

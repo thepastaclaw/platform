@@ -93,6 +93,11 @@ pub struct PersistenceCallbacks {
     /// Called when flush is requested. Returns 0 on success.
     pub on_flush_fn:
         Option<unsafe extern "C" fn(context: *mut c_void, wallet_id: *const u8) -> i32>,
+    /// Called when Rust needs to delete every persisted artefact for a
+    /// wallet. Used by compensating rollback when registration failed
+    /// after an earlier store committed durable state.
+    pub on_delete_wallet_fn:
+        Option<unsafe extern "C" fn(context: *mut c_void, wallet_id: *const u8) -> i32>,
     /// Called with incremental address balance updates. The entries array
     /// contains only addresses whose balance changed. The pointer is valid
     /// only for the duration of the callback.
@@ -488,6 +493,7 @@ impl Default for PersistenceCallbacks {
             on_changeset_end_fn: None,
             on_store_fn: None,
             on_flush_fn: None,
+            on_delete_wallet_fn: None,
             on_persist_address_balances_fn: None,
             on_persist_wallet_changeset_fn: None,
             on_persist_asset_locks_fn: None,
@@ -1490,6 +1496,22 @@ impl PlatformWalletPersistence for FFIPersister {
         }
 
         Ok(out)
+    }
+
+    fn delete(&self, wallet_id: WalletId) -> Result<(), PersistenceError> {
+        if let Some(cb) = self.callbacks.on_delete_wallet_fn {
+            let result = unsafe { cb(self.callbacks.context, wallet_id.as_ptr()) };
+            if result != 0 {
+                return Err(
+                    format!("Persistence delete callback returned error code {}", result).into(),
+                );
+            }
+        }
+
+        let mut pending = self.pending.write();
+        pending.remove(&wallet_id);
+
+        Ok(())
     }
 
     /// Look up a transaction record by `txid` via the
