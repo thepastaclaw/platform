@@ -55,10 +55,11 @@ use crate::platform::Fetch;
 use crate::sync::retry;
 use crate::Sdk;
 use dapi_grpc::platform::v0::{
-    get_addresses_branch_state_request, get_addresses_branch_state_response,
-    get_recent_address_balance_changes_request,
-    get_recent_compacted_address_balance_changes_request, GetAddressesBranchStateRequest,
-    GetRecentAddressBalanceChangesRequest, GetRecentCompactedAddressBalanceChangesRequest, Proof,
+    get_address_info_request, get_addresses_branch_state_request,
+    get_addresses_branch_state_response, get_recent_address_balance_changes_request,
+    get_recent_compacted_address_balance_changes_request, GetAddressInfoRequest,
+    GetAddressesBranchStateRequest, GetRecentAddressBalanceChangesRequest,
+    GetRecentCompactedAddressBalanceChangesRequest, Proof,
 };
 use dpp::balances::credits::{BlockAwareCreditOperation, CreditOperation};
 use dpp::prelude::AddressNonce;
@@ -66,7 +67,8 @@ use dpp::version::PlatformVersion;
 use drive::drive::{Drive, RootTree};
 use drive::grovedb::{Element, GroveBranchQueryResult, GroveTrunkQueryResult};
 use drive_proof_verifier::types::{
-    PlatformAddressTrunkState, RecentAddressBalanceChanges, RecentCompactedAddressBalanceChanges,
+    AddressInfo, PlatformAddressTrunkState, RecentAddressBalanceChanges,
+    RecentCompactedAddressBalanceChanges,
 };
 use rs_dapi_client::{
     DapiRequest, ExecutionError, ExecutionResponse, InnerInto, IntoInner, RequestSettings,
@@ -637,7 +639,10 @@ async fn incremental_catch_up<P: AddressProvider>(
                         };
 
                         if new_balance != current_balance {
-                            let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
+                            let nonce = nonce_for_incremental_address::<P>(
+                                sdk, result, result_key, &address, settings,
+                            )
+                            .await?;
                             let funds = AddressFunds {
                                 nonce,
                                 balance: new_balance,
@@ -695,7 +700,10 @@ async fn incremental_catch_up<P: AddressProvider>(
                     };
 
                     if new_balance != current_balance {
-                        let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
+                        let nonce = nonce_for_incremental_address::<P>(
+                            sdk, result, result_key, &address, settings,
+                        )
+                        .await?;
                         let funds = AddressFunds {
                             nonce,
                             balance: new_balance,
@@ -721,6 +729,36 @@ async fn incremental_catch_up<P: AddressProvider>(
     // this stays at 0 and the next sync falls back to RangeFrom (inclusive).
     result.last_known_recent_block = highest_recent_block;
     Ok(())
+}
+
+async fn nonce_for_incremental_address<P: AddressProvider>(
+    sdk: &Sdk,
+    result: &AddressSyncResult<P::Tag, P::Address>,
+    result_key: (P::Tag, P::Address),
+    address: &P::Address,
+    settings: RequestSettings,
+) -> Result<AddressNonce, Error> {
+    if let Some(funds) = result.found.get(&result_key) {
+        return Ok(funds.nonce);
+    }
+
+    let request = GetAddressInfoRequest {
+        version: Some(get_address_info_request::Version::V0(
+            get_address_info_request::GetAddressInfoRequestV0 {
+                address: address.to_bytes(),
+                prove: true,
+            },
+        )),
+    };
+
+    let (info, _, _) =
+        AddressInfo::fetch_with_metadata_and_proof(sdk, request, Some(settings)).await?;
+    info.map(|found| found.nonce).ok_or_else(|| {
+        Error::InvalidProvedResponse(
+            "incremental address changes referenced an address without authoritative funds"
+                .to_string(),
+        )
+    })
 }
 
 /// Extract the highest block height from the recent tree boundaries in the proof.
@@ -941,6 +979,233 @@ impl Sdk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use dpp::address_funds::PlatformAddress;
+    use dpp::balances::credits::{BlockAwareCreditOperation, CreditOperation};
+    use drive_proof_verifier::types::{
+        BlockAddressBalanceChanges, CompactedBlockAddressBalanceChanges,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(Default)]
+    struct TestAddressProvider {
+        pending: BTreeMap<AddressIndex, PlatformAddress>,
+        found: BTreeMap<(AddressIndex, PlatformAddress), AddressFunds>,
+        absent: BTreeSet<(AddressIndex, PlatformAddress)>,
+        current: BTreeMap<(AddressIndex, PlatformAddress), AddressFunds>,
+        last_sync_height: u64,
+    }
+
+    impl TestAddressProvider {
+        fn with_pending(pending: Vec<(AddressIndex, PlatformAddress)>) -> Self {
+            Self {
+                pending: pending.into_iter().collect(),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AddressProvider for TestAddressProvider {
+        type Tag = AddressIndex;
+        type Address = PlatformAddress;
+
+        fn gap_limit(&self) -> AddressIndex {
+            0
+        }
+
+        fn pending_addresses(&self) -> impl Iterator<Item = (Self::Tag, Self::Address)> + '_ {
+            self.pending
+                .iter()
+                .map(|(index, address)| (*index, *address))
+        }
+
+        fn has_pending(&self) -> bool {
+            !self.pending.is_empty()
+        }
+
+        async fn on_address_found(
+            &mut self,
+            tag: Self::Tag,
+            address: &Self::Address,
+            funds: AddressFunds,
+        ) {
+            self.found.insert((tag, *address), funds);
+            self.pending.remove(&tag);
+        }
+
+        async fn on_address_absent(&mut self, tag: Self::Tag, address: &Self::Address) {
+            self.absent.insert((tag, *address));
+            self.pending.remove(&tag);
+        }
+
+        fn current_balances(
+            &self,
+        ) -> impl Iterator<Item = (Self::Tag, Self::Address, AddressFunds)> + '_ {
+            self.current
+                .iter()
+                .map(|((tag, address), funds)| (*tag, *address, *funds))
+        }
+
+        fn last_sync_height(&self) -> u64 {
+            self.last_sync_height
+        }
+    }
+
+    async fn expect_incremental_queries(
+        sdk: &mut Sdk,
+        recent: RecentAddressBalanceChanges,
+        compacted: RecentCompactedAddressBalanceChanges,
+        address: PlatformAddress,
+        nonce: AddressNonce,
+        balance: u64,
+    ) {
+        sdk.mock()
+            .expect_fetch::<RecentAddressBalanceChanges, _>(
+                GetRecentAddressBalanceChangesRequest {
+                    version: Some(get_recent_address_balance_changes_request::Version::V0(
+                        get_recent_address_balance_changes_request::GetRecentAddressBalanceChangesRequestV0 {
+                            start_height: 0,
+                            prove: true,
+                            start_height_exclusive: false,
+                        },
+                    )),
+                },
+                Some(recent),
+            )
+            .await
+            .expect("recent expectation should be configured");
+
+        sdk.mock()
+            .expect_fetch::<RecentCompactedAddressBalanceChanges, _>(
+                GetRecentCompactedAddressBalanceChangesRequest {
+                    version: Some(
+                        get_recent_compacted_address_balance_changes_request::Version::V0(
+                            get_recent_compacted_address_balance_changes_request::GetRecentCompactedAddressBalanceChangesRequestV0 {
+                                start_block_height: 0,
+                                prove: true,
+                            },
+                        ),
+                    ),
+                },
+                Some(compacted),
+            )
+            .await
+            .expect("compacted expectation should be configured");
+
+        sdk.mock()
+            .expect_fetch::<AddressInfo, _>(
+                GetAddressInfoRequest {
+                    version: Some(get_address_info_request::Version::V0(
+                        get_address_info_request::GetAddressInfoRequestV0 {
+                            address: address.to_bytes(),
+                            prove: true,
+                        },
+                    )),
+                },
+                Some(AddressInfo {
+                    address,
+                    nonce,
+                    balance,
+                }),
+            )
+            .await
+            .expect("address info expectation should be configured");
+    }
+
+    #[tokio::test]
+    async fn test_incremental_recent_new_address_fetches_authoritative_nonce() {
+        let address = PlatformAddress::P2pkh([7; 20]);
+        let expected_nonce = 11;
+        let expected_balance = 1250;
+        let mut sdk = Sdk::new_mock();
+
+        expect_incremental_queries(
+            &mut sdk,
+            RecentAddressBalanceChanges(vec![BlockAddressBalanceChanges {
+                block_height: 42,
+                changes: BTreeMap::from([(address, CreditOperation::SetCredits(expected_balance))]),
+            }]),
+            RecentCompactedAddressBalanceChanges::default(),
+            address,
+            expected_nonce,
+            expected_balance,
+        )
+        .await;
+
+        let mut provider = TestAddressProvider::with_pending(vec![(0, address)]);
+        let last_sync_timestamp = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be after epoch")
+                .as_secs(),
+        );
+
+        let result = sync_address_balances(&sdk, &mut provider, None, last_sync_timestamp)
+            .await
+            .expect("incremental sync should succeed");
+
+        assert_eq!(
+            result.found.get(&(0, address)),
+            Some(&AddressFunds {
+                nonce: expected_nonce,
+                balance: expected_balance,
+            })
+        );
+        assert_eq!(
+            provider.found.get(&(0, address)),
+            result.found.get(&(0, address))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_incremental_compacted_new_address_fetches_authoritative_nonce() {
+        let address = PlatformAddress::P2pkh([9; 20]);
+        let expected_nonce = 23;
+        let expected_balance = 980;
+        let mut sdk = Sdk::new_mock();
+
+        expect_incremental_queries(
+            &mut sdk,
+            RecentAddressBalanceChanges::default(),
+            RecentCompactedAddressBalanceChanges(vec![CompactedBlockAddressBalanceChanges {
+                start_block_height: 30,
+                end_block_height: 31,
+                changes: BTreeMap::from([(
+                    address,
+                    BlockAwareCreditOperation::SetCredits(expected_balance),
+                )]),
+            }]),
+            address,
+            expected_nonce,
+            expected_balance,
+        )
+        .await;
+
+        let mut provider = TestAddressProvider::with_pending(vec![(0, address)]);
+        let last_sync_timestamp = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time should be after epoch")
+                .as_secs(),
+        );
+
+        let result = sync_address_balances(&sdk, &mut provider, None, last_sync_timestamp)
+            .await
+            .expect("incremental sync should succeed");
+
+        assert_eq!(
+            result.found.get(&(0, address)),
+            Some(&AddressFunds {
+                nonce: expected_nonce,
+                balance: expected_balance,
+            })
+        );
+        assert_eq!(
+            provider.found.get(&(0, address)),
+            result.found.get(&(0, address))
+        );
+    }
 
     #[test]
     fn test_extract_funds_from_element() {
