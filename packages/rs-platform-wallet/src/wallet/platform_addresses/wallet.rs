@@ -1,5 +1,6 @@
 //! Platform address wallet for DIP-17 platform payment addresses.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use dpp::address_funds::PlatformAddress;
@@ -29,6 +30,17 @@ pub struct PlatformAddressWallet {
     pub(crate) provider: Arc<RwLock<Option<PlatformPaymentAddressProvider>>>,
     /// Per-wallet persistence handle for queuing changesets.
     pub(crate) persister: WalletPersister,
+    /// In-memory receive-address reservations keyed by account/key-class.
+    /// This prevents back-to-back hand-outs from reusing the same unused
+    /// derivation index without mutating key-wallet's actual `used` state.
+    pub(crate) reserved_receive_indices: Arc<
+        RwLock<
+            BTreeMap<
+                key_wallet::account::account_collection::PlatformPaymentAccountKey,
+                BTreeSet<u32>,
+            >,
+        >,
+    >,
 }
 
 impl PlatformAddressWallet {
@@ -47,6 +59,7 @@ impl PlatformAddressWallet {
             wallet_id,
             provider: Arc::new(RwLock::new(None)),
             persister,
+            reserved_receive_indices: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -230,6 +243,9 @@ impl PlatformAddressWallet {
         &self,
         account_key: key_wallet::account::account_collection::PlatformPaymentAccountKey,
     ) -> Result<PlatformAddress, PlatformWalletError> {
+        let mut reservations = self.reserved_receive_indices.write().await;
+        let reserved = reservations.entry(account_key).or_default();
+
         let mut wm = self.wallet_manager.write().await;
         let (wallet, info) = wm
             .get_wallet_mut_and_info_mut(&self.wallet_id)
@@ -265,32 +281,41 @@ impl PlatformAddressWallet {
             key_wallet::KeySource::Public(xpub)
         };
 
-        // Reserve the address on hand-out (Found-026): platform-payment
-        // `used` only flips on a positive synced balance, so without
-        // marking it here a concurrent caller's `next_unused` would
-        // re-hand the same index before the sync pass. `mark_index_used`
-        // is idempotent — a later real sync hit on this index is a
-        // no-op, so gap-limit/`highest_used` accounting isn't doubled.
-        let address_info = managed_account
-            .addresses
-            .next_unused_with_info(&key_source, true)
-            .map_err(|e| PlatformWalletError::AddressSync(e.to_string()))?;
-        // INTENTIONAL(CMT-001 / #3658 review): The reservation is in-memory only
-        // by design — no `persister.store` on the hand-out path. Two properties
-        // justify this:
-        //   1. Chain sync re-marks actually-used addresses via the positive-
-        //      balance flip, so a crash that loses the in-memory flag is
-        //      self-healing once any payment arrives at the index.
-        //   2. Addresses requested but never paid to are freed for reuse on the
-        //      next session, avoiding unbounded index-gap growth from
-        //      speculative or abandoned hand-outs.
-        // The narrow surviving window — crash before next sync AND no payment
-        // received by restart — manifests as address-reuse (privacy/accounting),
-        // not fund loss. See also follow-up: persist on hand-out becomes
-        // required if/when this function is wired to FFI.
-        managed_account
-            .addresses
-            .mark_index_used(address_info.index);
+        let address_info = if let Some(info) =
+            managed_account
+                .addresses
+                .addresses
+                .iter()
+                .find_map(|(&index, info)| {
+                    (!info.used && !reserved.contains(&index)).then(|| info.clone())
+                }) {
+            info
+        } else {
+            let existing_unused_count = managed_account
+                .addresses
+                .addresses
+                .values()
+                .filter(|info| !info.used)
+                .count();
+
+            managed_account
+                .addresses
+                .next_unused_multiple_with_info(existing_unused_count + 1, &key_source, true)
+                .into_iter()
+                .find_map(|(_address, info)| (!reserved.contains(&info.index)).then_some(info))
+                .ok_or_else(|| {
+                    PlatformWalletError::AddressSync(
+                        "Failed to reserve an unreserved receive address".into(),
+                    )
+                })?
+        };
+
+        // INTENTIONAL(CMT-001 / #3658 QE review): the hand-out reservation is
+        // in-memory only and distinct from AddressPool `used`. A synced positive
+        // balance still performs the real `mark_*_used` transition; addresses
+        // handed out but never funded are released on restart rather than
+        // permanently advancing `highest_used`.
+        reserved.insert(address_info.index);
         let address = address_info.address;
 
         PlatformAddress::try_from(address).map_err(|e| {
@@ -407,11 +432,7 @@ mod found_026_tests {
 
     /// Found-026 durable guard: two `next_unused_receive_address` calls
     /// with NO intervening sync/balance update must return DISTINCT
-    /// addresses. Pre-fix, `next_unused` re-hands index 0 (its `used`
-    /// flag only flips on a positive synced balance) → identical
-    /// addresses → this assertion fails. Post-fix the first call
-    /// reserves index 0 via `mark_index_used`, so the second yields
-    /// index 1.
+    /// addresses without mutating key-wallet's actual `used` state.
     #[tokio::test]
     async fn found_026_back_to_back_handout_returns_distinct_addresses() {
         let wallet = wallet_with_platform_account();
@@ -428,6 +449,28 @@ mod found_026_tests {
         assert_ne!(
             a, b,
             "back-to-back hand-out with no sync re-handed the same address (Found-026)"
+        );
+
+        let wm = wallet.wallet_manager.read().await;
+        let account = wm
+            .get_wallet_info(&wallet.wallet_id)
+            .and_then(|info| {
+                info.core_wallet
+                    .platform_payment_managed_account_at_index(0)
+            })
+            .expect("managed platform account");
+
+        assert_eq!(
+            account.addresses.highest_used, None,
+            "hand-out reservation must not advance AddressPool highest_used"
+        );
+        assert!(
+            account
+                .addresses
+                .info_at_index(0)
+                .map(|info| !info.used)
+                .unwrap_or(false),
+            "reserved receive address must remain unused until sync proves it funded"
         );
     }
 }
