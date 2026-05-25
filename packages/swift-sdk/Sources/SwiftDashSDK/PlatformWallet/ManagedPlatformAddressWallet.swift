@@ -83,7 +83,7 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
         }
     }
 
-    /// Destination address for the change output the wrapper appends to
+    /// Destination address for the change output the wrapper includes in
     /// every transfer. Carries no `credits` field — the wrapper computes
     /// the change amount itself as `sum(inputs) - sum(outputs)`.
     public struct ChangeAddress: Sendable {
@@ -123,16 +123,19 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
     ///   non-recipient balance-bearing address — workable but it
     ///   accumulates change onto an existing address.
     ///
-    /// Fee strategy is `ReduceOutput(change_index)` so each recipient
-    /// gets exactly its requested amount and the change output absorbs
-    /// the on-chain fee.
+    /// Fee strategy is `ReduceOutput(change_index)` where `change_index`
+    /// is the change row's index after canonical output ordering, matching
+    /// Rust's `BTreeMap<PlatformAddress, Credits>`. Each recipient gets
+    /// exactly its requested amount and the change output absorbs the
+    /// on-chain fee.
     ///
     /// The signer must be able to sign for the selected inputs — i.e.
     /// the `KeychainSigner` resolves their derivation paths via
     /// SwiftData + the wallet mnemonic (the `0xFF` branch in
     /// `KeychainSigner.swift`).
     /// Cushion held back so the change output stays positive after the on-chain
-    /// fee is deducted (the transfer uses `ReduceOutput(change_index)`).
+    /// fee is deducted (the transfer uses `ReduceOutput(change_index)` after
+    /// canonical output ordering).
     /// Observed fee for a 1-input/2-output transition is ~6.5M credits;
     /// this is intentionally an order of magnitude larger so estimation
     /// drift doesn't force an "insufficient" failure in normal use.
@@ -232,21 +235,21 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
         // Resolve the change destination: caller-supplied address wins
         // (fresh HD address from the unused pool); otherwise reserve a
         // balance-bearing address that's neither input nor recipient.
-        let resolvedChange: (addressType: UInt8, hash: Data)
+        let resolvedChange: ChangeAddress
         if let cc = changeAddress {
             guard !selectedHashes.contains(cc.hash) else {
                 throw PlatformWalletError.walletOperation(
                     "changeAddress collides with a selected input address."
                 )
             }
-            resolvedChange = (cc.addressType, cc.hash)
+            resolvedChange = cc
         } else {
             guard let fallback = balanced.first(where: { !selectedHashes.contains($0.hash) }) else {
                 throw PlatformWalletError.walletOperation(
                     "Could not find a wallet address distinct from inputs to use as the change destination — pass a fresh HD address via `changeAddress`."
                 )
             }
-            resolvedChange = (fallback.addressType, fallback.hash)
+            resolvedChange = ChangeAddress(addressType: fallback.addressType, hash: fallback.hash)
         }
 
         // Marshal explicit inputs.
@@ -262,40 +265,17 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
             )
         }
 
-        // Marshal recipient outputs.
-        var ffiOutputs: [AddressBalanceEntryFFI] = []
-        ffiOutputs.reserveCapacity(outputs.count + 1)
-        for out in outputs {
-            let outTuple = Self.hashTuple(from: out.hash)
-            ffiOutputs.append(
-                AddressBalanceEntryFFI(
-                    address: PlatformAddressFFI(address_type: out.addressType, hash: outTuple),
-                    balance: out.credits,
-                    nonce: 0,
-                    account_index: 0,
-                    address_index: 0
-                )
-            )
-        }
-
-        // Append the change output to the resolved change address —
-        // guaranteed to be distinct from every input and recipient
-        // (the protocol rejects outputs that also appear as inputs).
         let changeAmount = totalInputs - totalRecipientCredits
-        let changeTuple = Self.hashTuple(from: resolvedChange.hash)
-        ffiOutputs.append(
-            AddressBalanceEntryFFI(
-                address: PlatformAddressFFI(address_type: resolvedChange.addressType, hash: changeTuple),
-                balance: changeAmount,
-                nonce: 0,
-                account_index: 0,
-                address_index: 0
-            )
+        let outputPlan = Self.canonicalTransferOutputPlan(
+            outputs: outputs,
+            changeAddress: resolvedChange,
+            changeAmount: changeAmount
         )
+        let ffiOutputs = outputPlan.rows
 
-        // Fee strategy: take the fee out of the change output (last index)
-        // so recipients get their requested amounts unchanged.
-        let changeIndex = UInt16(ffiOutputs.count - 1)
+        // Fee strategy: take the fee out of the change output's canonical
+        // index so recipients keep their requested amounts unchanged.
+        let changeIndex = outputPlan.changeIndex
         let feeStrategy: [FeeStrategyStepFFI] = [
             FeeStrategyStepFFI(step_type: 1, index: changeIndex)  // 1 = ReduceOutput
         ]
@@ -367,6 +347,80 @@ public final class ManagedPlatformAddressWallet: @unchecked Sendable {
             b[5], b[6], b[7], b[8], b[9],
             b[10], b[11], b[12], b[13], b[14],
             b[15], b[16], b[17], b[18], b[19]
+        )
+    }
+
+    struct CanonicalTransferOutputPlan {
+        let rows: [AddressBalanceEntryFFI]
+        let changeIndex: UInt16
+    }
+
+    /// Mirror Rust's `PlatformAddress` ordering so `ReduceOutput(index)`
+    /// points at the same output after FFI parsing canonicalizes to a `BTreeMap`.
+    static func canonicalTransferOutputPlan(
+        outputs: [TransferOutput],
+        changeAddress: ChangeAddress,
+        changeAmount: UInt64
+    ) -> CanonicalTransferOutputPlan {
+        struct TaggedOutput {
+            let row: AddressBalanceEntryFFI
+            let addressType: UInt8
+            let hash: Data
+            let isChange: Bool
+        }
+
+        var taggedOutputs: [TaggedOutput] = []
+        taggedOutputs.reserveCapacity(outputs.count + 1)
+
+        for output in outputs {
+            taggedOutputs.append(
+                TaggedOutput(
+                    row: AddressBalanceEntryFFI(
+                        address: PlatformAddressFFI(
+                            address_type: output.addressType,
+                            hash: hashTuple(from: output.hash)
+                        ),
+                        balance: output.credits,
+                        nonce: 0,
+                        account_index: 0,
+                        address_index: 0
+                    ),
+                    addressType: output.addressType,
+                    hash: output.hash,
+                    isChange: false
+                )
+            )
+        }
+
+        taggedOutputs.append(
+            TaggedOutput(
+                row: AddressBalanceEntryFFI(
+                    address: PlatformAddressFFI(
+                        address_type: changeAddress.addressType,
+                        hash: hashTuple(from: changeAddress.hash)
+                    ),
+                    balance: changeAmount,
+                    nonce: 0,
+                    account_index: 0,
+                    address_index: 0
+                ),
+                addressType: changeAddress.addressType,
+                hash: changeAddress.hash,
+                isChange: true
+            )
+        )
+
+        taggedOutputs.sort { lhs, rhs in
+            if lhs.addressType != rhs.addressType {
+                return lhs.addressType < rhs.addressType
+            }
+            return lhs.hash.lexicographicallyPrecedes(rhs.hash)
+        }
+
+        let changeIndex = UInt16(taggedOutputs.firstIndex(where: { $0.isChange })!)
+        return CanonicalTransferOutputPlan(
+            rows: taggedOutputs.map(\.row),
+            changeIndex: changeIndex
         )
     }
 }
