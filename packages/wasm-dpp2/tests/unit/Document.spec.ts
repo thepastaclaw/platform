@@ -177,6 +177,33 @@ describe('Document', () => {
       expect(json.message).to.equal('Tutorial CI Test @ Tue, 07 Jan 2025 15:27:50 GMT');
       expect(typeof json.$entropy).to.equal('string');
     });
+
+    it('should serialize unsafe integer fields as decimal strings without throwing', () => {
+      const bigValue = 1000000000000000000n; // > Number.MAX_SAFE_INTEGER (2^53 - 1)
+
+      // Round-trip through fromObject so that BigInt fields land in platform_value
+      // as U64 (and therefore as JsonValue::Number(u64) inside Document::to_json),
+      // which is the scenario that previously broke json_compatible serialization.
+      const baseInstance = createDocument({ id });
+      const obj = baseInstance.toObject();
+      obj.$revision = bigValue;
+      obj.user = bigValue;
+      const documentInstance = wasm.Document.fromObject(obj);
+
+      let json: ReturnType<typeof documentInstance.toJSON> | undefined;
+      expect(() => { json = documentInstance.toJSON(); }).to.not.throw();
+
+      expect(json!.$revision).to.equal(bigValue.toString());
+      expect(json!.user).to.equal(bigValue.toString());
+    });
+
+    it('should keep small integer fields as JS numbers', () => {
+      const smallDoc = createDocument({ id });
+      const json = smallDoc.toJSON();
+
+      expect(typeof json.$revision).to.equal('number');
+      expect(json.$revision).to.equal(Number(revision));
+    });
   });
 
   describe('fromJSON()', () => {

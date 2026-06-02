@@ -67,12 +67,61 @@ pub fn js_value_to_json(value: &JsValue) -> WasmDppResult<JsonValue> {
     })
 }
 
+/// JavaScript's `Number.MAX_SAFE_INTEGER` (`2^53 - 1`).
+const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+/// JavaScript's `Number.MIN_SAFE_INTEGER` (`-(2^53 - 1)`).
+const JS_MIN_SAFE_INTEGER: i64 = -9_007_199_254_740_991;
+
+/// Recursively rewrites integer `serde_json::Number` values outside JavaScript's
+/// safe integer range as decimal strings, in place.
+///
+/// `serde_json::Value` routes every integer through `i64`/`u64`, so a blanket
+/// large-number stringification at the serde level would incorrectly stringify
+/// small `u8`/`u16`/`u32` values too. Instead we look only at the actual numeric
+/// magnitude: anything that fits in the JS safe-integer window stays a number;
+/// anything outside it (where `serde_wasm_bindgen::Serializer::json_compatible`
+/// would otherwise return an error) is rewritten to its decimal string.
+///
+/// Floats, bools, strings, nulls, and in-range integers are left untouched.
+fn stringify_unsafe_integers(value: &mut JsonValue) {
+    match value {
+        JsonValue::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                if u > JS_MAX_SAFE_INTEGER {
+                    *value = JsonValue::String(u.to_string());
+                }
+            } else if let Some(i) = n.as_i64() {
+                if i < JS_MIN_SAFE_INTEGER {
+                    *value = JsonValue::String(i.to_string());
+                }
+            }
+            // f64 (floats) and in-range integers: leave as-is.
+        }
+        JsonValue::Array(arr) => {
+            for v in arr.iter_mut() {
+                stringify_unsafe_integers(v);
+            }
+        }
+        JsonValue::Object(obj) => {
+            for v in obj.values_mut() {
+                stringify_unsafe_integers(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Convert serde_json::Value to JsValue using JSON-compatible serialization.
 ///
-/// This ensures objects become plain JS objects (not Maps).
+/// This ensures objects become plain JS objects (not Maps). Integer values
+/// outside JavaScript's safe integer range are rewritten to decimal strings
+/// before serialization, since `serde_wasm_bindgen::Serializer::json_compatible`
+/// rejects such numbers.
 pub fn json_to_js_value(value: &JsonValue) -> WasmDppResult<JsValue> {
+    let mut normalized = value.clone();
+    stringify_unsafe_integers(&mut normalized);
     let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-    value.serialize(&serializer).map_err(|e| {
+    normalized.serialize(&serializer).map_err(|e| {
         WasmDppError::serialization(format!("Failed to convert JSON to JsValue: {}", e))
     })
 }
@@ -690,4 +739,63 @@ macro_rules! impl_wasm_conversions_serde {
             }
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{JS_MAX_SAFE_INTEGER, JS_MIN_SAFE_INTEGER, JsonValue, stringify_unsafe_integers};
+    use serde_json::json;
+
+    #[test]
+    fn safe_positive_integer_stays_a_number() {
+        let mut v = json!({ "n": JS_MAX_SAFE_INTEGER });
+        stringify_unsafe_integers(&mut v);
+        assert!(v["n"].is_u64());
+        assert_eq!(v["n"].as_u64(), Some(JS_MAX_SAFE_INTEGER));
+    }
+
+    #[test]
+    fn safe_negative_integer_stays_a_number() {
+        let mut v = json!({ "n": JS_MIN_SAFE_INTEGER });
+        stringify_unsafe_integers(&mut v);
+        assert!(v["n"].is_i64());
+        assert_eq!(v["n"].as_i64(), Some(JS_MIN_SAFE_INTEGER));
+    }
+
+    #[test]
+    fn unsafe_positive_integer_becomes_decimal_string() {
+        let big: u64 = 1_000_000_000_000_000_000;
+        let mut v = json!({ "user": big });
+        stringify_unsafe_integers(&mut v);
+        assert_eq!(v["user"], JsonValue::String(big.to_string()));
+    }
+
+    #[test]
+    fn unsafe_negative_integer_becomes_decimal_string() {
+        let big_neg: i64 = -1_000_000_000_000_000_000;
+        let mut v = json!({ "n": big_neg });
+        stringify_unsafe_integers(&mut v);
+        assert_eq!(v["n"], JsonValue::String(big_neg.to_string()));
+    }
+
+    #[test]
+    fn floats_are_left_untouched() {
+        let mut v = json!({ "f": 1.5e20 });
+        stringify_unsafe_integers(&mut v);
+        assert!(v["f"].is_f64());
+    }
+
+    #[test]
+    fn nested_arrays_and_objects_are_walked() {
+        let big: u64 = u64::MAX;
+        let mut v = json!({
+            "list": [1, big, { "nested": big }],
+            "ok": 42,
+        });
+        stringify_unsafe_integers(&mut v);
+        assert_eq!(v["list"][0].as_u64(), Some(1));
+        assert_eq!(v["list"][1], JsonValue::String(big.to_string()));
+        assert_eq!(v["list"][2]["nested"], JsonValue::String(big.to_string()));
+        assert_eq!(v["ok"].as_u64(), Some(42));
+    }
 }
