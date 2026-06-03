@@ -22,7 +22,9 @@ const getDataContractFixture = require('@dashevo/wasm-dpp/lib/test/fixtures/getD
 const GrpcErrorCodes = require('@dashevo/grpc-common/lib/server/error/GrpcErrorCodes');
 const NotFoundGrpcError = require('@dashevo/grpc-common/lib/server/error/NotFoundGrpcError');
 const cbor = require('cbor');
+const crypto = require('crypto');
 const GrpcCallMock = require('../../../../../lib/test/mock/GrpcCallMock');
+const RPCError = require('../../../../../lib/rpcServer/RPCError');
 
 const broadcastStateTransitionHandlerFactory = require(
   '../../../../../lib/grpcServer/handlers/platform/broadcastStateTransitionHandlerFactory',
@@ -194,8 +196,13 @@ describe('broadcastStateTransitionHandlerFactory', () => {
       data: 'tx already exists in cache',
     };
 
-    requestTenderRpcMock.withArgs('unconfirmed_txs').resolves({
-      txs: [stateTransitionFixture.toBuffer().toString('base64')],
+    const stBytes = stateTransitionFixture.toBuffer();
+    const stHashBase64 = crypto.createHash('sha256').update(stBytes).digest()
+      .toString('base64');
+    const stHashHex = `0x${crypto.createHash('sha256').update(stBytes).digest('hex')}`;
+
+    requestTenderRpcMock.withArgs('unconfirmed_tx').resolves({
+      tx: stBytes.toString('base64'),
     });
 
     try {
@@ -205,15 +212,30 @@ describe('broadcastStateTransitionHandlerFactory', () => {
     } catch (e) {
       expect(e).to.be.an.instanceOf(AlreadyExistsGrpcError);
       expect(e.getMessage()).to.equal('state transition already in mempool');
+
+      // The handler must look up the specific ST by base64-encoded sha256
+      // hash, not page through the mempool or use a 0x-prefixed hex hash.
+      expect(requestTenderRpcMock).to.be.calledWith('unconfirmed_tx', { hash: stHashBase64 });
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_tx', { hash: stHashHex });
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_txs');
     }
   });
 
-  it('should throw AlreadyExistsGrpcError if transaction in chain', async () => {
+  it('should fall through to chain lookup when unconfirmed_tx is not found', async () => {
     response.error = {
       code: -32603,
       message: 'Internal error',
       data: 'tx already exists in cache',
     };
+
+    const stBytes = stateTransitionFixture.toBuffer();
+    const stHashBase64 = crypto.createHash('sha256').update(stBytes).digest()
+      .toString('base64');
+    const stHashHex = `0x${crypto.createHash('sha256').update(stBytes).digest('hex')}`;
+
+    requestTenderRpcMock.withArgs('unconfirmed_tx').rejects(
+      new RPCError(-32603, 'Internal error', 'tx (...) not found'),
+    );
 
     requestTenderRpcMock.withArgs('tx').resolves({
       tx_result: { },
@@ -226,6 +248,60 @@ describe('broadcastStateTransitionHandlerFactory', () => {
     } catch (e) {
       expect(e).to.be.an.instanceOf(AlreadyExistsGrpcError);
       expect(e.getMessage()).to.equal('state transition already in chain');
+
+      expect(requestTenderRpcMock).to.be.calledWith('unconfirmed_tx', { hash: stHashBase64 });
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_tx', { hash: stHashHex });
+      expect(requestTenderRpcMock).to.be.calledWith('tx', { hash: stHashBase64 });
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_txs');
+    }
+  });
+
+  it('should re-throw unexpected errors from unconfirmed_tx', async () => {
+    response.error = {
+      code: -32603,
+      message: 'Internal error',
+      data: 'tx already exists in cache',
+    };
+
+    const unexpectedError = new RPCError(-32603, 'Internal error', 'something went terribly wrong');
+
+    requestTenderRpcMock.withArgs('unconfirmed_tx').rejects(unexpectedError);
+
+    try {
+      await broadcastStateTransitionHandler(call);
+
+      expect.fail('should re-throw the unexpected error');
+    } catch (e) {
+      expect(e).to.equal(unexpectedError);
+      expect(requestTenderRpcMock).to.not.be.calledWith('tx');
+      expect(requestTenderRpcMock).to.not.be.calledWith('check_tx');
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_txs');
+    }
+  });
+
+  it('should throw AlreadyExistsGrpcError if transaction in chain', async () => {
+    response.error = {
+      code: -32603,
+      message: 'Internal error',
+      data: 'tx already exists in cache',
+    };
+
+    requestTenderRpcMock.withArgs('unconfirmed_tx').rejects(
+      new RPCError(-32603, 'Internal error', 'tx not found'),
+    );
+
+    requestTenderRpcMock.withArgs('tx').resolves({
+      tx_result: { },
+    });
+
+    try {
+      await broadcastStateTransitionHandler(call);
+
+      expect.fail('should throw AlreadyExistsGrpcError');
+    } catch (e) {
+      expect(e).to.be.an.instanceOf(AlreadyExistsGrpcError);
+      expect(e.getMessage()).to.equal('state transition already in chain');
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_txs');
     }
   });
 
@@ -235,6 +311,10 @@ describe('broadcastStateTransitionHandlerFactory', () => {
       message: 'Internal error',
       data: 'tx already exists in cache',
     };
+
+    requestTenderRpcMock.withArgs('unconfirmed_tx').rejects(
+      new RPCError(-32603, 'Internal error', 'tx not found'),
+    );
 
     requestTenderRpcMock.withArgs('check_tx').resolves({
       code: 1,
@@ -251,6 +331,7 @@ describe('broadcastStateTransitionHandlerFactory', () => {
       expect.fail('should throw consensus error');
     } catch (e) {
       expect(e).to.equal(error);
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_txs');
     }
   });
 
@@ -260,6 +341,10 @@ describe('broadcastStateTransitionHandlerFactory', () => {
       message: 'Internal error',
       data: 'tx already exists in cache',
     };
+
+    requestTenderRpcMock.withArgs('unconfirmed_tx').rejects(
+      new RPCError(-32603, 'Internal error', 'tx not found'),
+    );
 
     requestTenderRpcMock.withArgs('check_tx').resolves({
       code: 0,
@@ -272,6 +357,7 @@ describe('broadcastStateTransitionHandlerFactory', () => {
     } catch (e) {
       expect(e).to.be.an.instanceOf(InternalGrpcError);
       expect(e.getMessage()).to.equal('Internal error');
+      expect(requestTenderRpcMock).to.not.be.calledWith('unconfirmed_txs');
     }
   });
 
