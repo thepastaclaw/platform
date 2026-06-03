@@ -75,19 +75,29 @@ function broadcastStateTransitionHandlerFactory(
           const stHash = crypto.createHash('sha256')
             .update(stBytes)
             .digest();
+          const stHashBase64 = stHash.toString('base64');
 
-          // TODO: Apply search filter to fetch specific state transition
-          // Throw an already exist in mempool error if the ST in mempool
-          const unconfirmedTxsResponse = await requestTenderRpc('unconfirmed_txs', { limit: 100 });
+          // Fetch the specific unconfirmed transaction by hash to determine if
+          // the ST is currently sitting in the mempool. The Rust DAPI
+          // reference and the JS `tx` lookup below both use base64 for this
+          // Tenderdash hash parameter.
+          let unconfirmedTxResponse;
+          try {
+            unconfirmedTxResponse = await requestTenderRpc('unconfirmed_tx', { hash: stHashBase64 });
+          } catch (e) {
+            if (typeof e.data !== 'string' || !e.data.includes('not found')) {
+              throw e;
+            }
+          }
 
-          if (unconfirmedTxsResponse?.txs?.includes(stBytes.toString('base64'))) {
+          if (unconfirmedTxResponse?.tx) {
             throw new AlreadyExistsGrpcError('state transition already in mempool');
           }
 
           // Throw an already exist in chain error if the ST is committed
           let txResponse;
           try {
-            txResponse = await requestTenderRpc('tx', { hash: stHash.toString('base64') });
+            txResponse = await requestTenderRpc('tx', { hash: stHashBase64 });
           } catch (e) {
             if (typeof e.data !== 'string' || !e.data.includes('not found')) {
               throw e;
