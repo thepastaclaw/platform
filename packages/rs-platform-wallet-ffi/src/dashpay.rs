@@ -177,7 +177,8 @@ pub unsafe extern "C" fn platform_wallet_sync_contact_requests(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.sync_contact_requests().await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let list = unwrap_result_or_return!(result);
     unsafe { *out_array = ContactRequestHandleArray::from_requests(list) };
     PlatformWalletFFIResult::ok()
@@ -251,7 +252,8 @@ pub unsafe extern "C" fn platform_wallet_send_contact_request_with_signer(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let request = unwrap_result_or_return!(result);
     *out_request_handle = CONTACT_REQUEST_STORAGE.insert(request);
     PlatformWalletFFIResult::ok()
@@ -294,7 +296,8 @@ pub unsafe extern "C" fn platform_wallet_accept_contact_request_with_signer(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let contact = unwrap_result_or_return!(result);
     *out_established_handle = ESTABLISHED_CONTACT_STORAGE.insert(contact);
     PlatformWalletFFIResult::ok()
@@ -323,7 +326,8 @@ pub unsafe extern "C" fn platform_wallet_reject_contact_request(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.reject_contact_request(&our_id, &contact_id).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     unwrap_result_or_return!(result);
     PlatformWalletFFIResult::ok()
 }
@@ -346,7 +350,8 @@ pub unsafe extern "C" fn platform_wallet_fetch_sent_contact_requests(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.sent_contact_requests(&id).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let list = unwrap_result_or_return!(result);
     unsafe { *out_array = ContactRequestHandleArray::from_requests(list) };
     PlatformWalletFFIResult::ok()
@@ -383,7 +388,8 @@ pub unsafe extern "C" fn platform_wallet_send_dashpay_payment(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let (txid, _entry) = unwrap_result_or_return!(result);
     use dashcore::hashes::Hash;
     let bytes = txid.to_raw_hash().to_byte_array();

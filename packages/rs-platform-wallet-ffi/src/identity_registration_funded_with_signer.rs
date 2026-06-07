@@ -118,7 +118,8 @@ pub unsafe extern "C" fn platform_wallet_register_identity_with_funding_signer(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let identity = unwrap_result_or_return!(result);
     let id_bytes: [u8; 32] = identity.id().to_buffer();
     *out_identity_id = id_bytes;
@@ -232,7 +233,8 @@ pub unsafe extern "C" fn platform_wallet_resume_identity_with_existing_asset_loc
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let identity = unwrap_result_or_return!(result);
     let id_bytes: [u8; 32] = identity.id().to_buffer();
     *out_identity_id = id_bytes;

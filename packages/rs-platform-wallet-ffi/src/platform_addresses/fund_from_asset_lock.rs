@@ -113,7 +113,8 @@ pub unsafe extern "C" fn platform_address_wallet_fund_from_asset_lock_signer(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let changeset = unwrap_result_or_return!(result);
     *out_changeset = PlatformAddressChangeSetFFI::from(&changeset);
     PlatformWalletFFIResult::ok()
@@ -203,7 +204,8 @@ pub unsafe extern "C" fn platform_address_wallet_resume_fund_from_asset_lock_sig
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let changeset = unwrap_result_or_return!(result);
     *out_changeset = PlatformAddressChangeSetFFI::from(&changeset);
     PlatformWalletFFIResult::ok()

@@ -50,7 +50,7 @@ pub unsafe extern "C" fn platform_wallet_create_data_contract_with_signer(
 
     let option = PLATFORM_WALLET_STORAGE.with_item(wallet_handle, |wallet| {
         let identity_wallet = wallet.identity().clone();
-        let result: Result<Identifier, _> = block_on_worker(async move {
+        block_on_worker(async move {
             let signer: &VTableSigner = &*(signer_addr as *const VTableSigner);
             identity_wallet
                 .create_data_contract_with_signer(
@@ -65,10 +65,10 @@ pub unsafe extern "C" fn platform_wallet_create_data_contract_with_signer(
                 )
                 .await
                 .map(|contract| contract.id())
-        });
-        result
+        })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result: Result<Identifier, _> = unwrap_result_or_return!(join_result);
     let contract_id = unwrap_result_or_return!(result);
     let bytes = contract_id.to_buffer();
     let dst = slice::from_raw_parts_mut(out_contract_id, 32);

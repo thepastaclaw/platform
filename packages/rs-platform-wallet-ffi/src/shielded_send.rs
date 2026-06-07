@@ -44,6 +44,7 @@ use crate::core_wallet_types::OutPointFFI;
 use crate::error::*;
 use crate::handle::*;
 use crate::runtime::{block_on_worker, runtime};
+use crate::unwrap_result_or_return;
 
 /// Kick off the Halo 2 proving-key build on a background tokio
 /// worker if it hasn't been built yet. Returns immediately —
@@ -111,12 +112,13 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_transfer(
     // and crashes with EXC_BAD_ACCESS at the first
     // `synthesize(... measure(pass))` call when polled on the
     // calling thread.
-    let result = block_on_worker(async move {
+    let join_result = block_on_worker(async move {
         let prover = CachedOrchardProver::new();
         wallet
             .shielded_transfer_to(&coordinator, account, &recipient, amount, &prover)
             .await
     });
+    let result = unwrap_result_or_return!(join_result);
     if let Err(e) = result {
         return PlatformWalletFFIResult::err(
             PlatformWalletFFIResultCode::ErrorWalletOperation,
@@ -169,12 +171,13 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_unshield(
         Err(result) => return result,
     };
 
-    let result = block_on_worker(async move {
+    let join_result = block_on_worker(async move {
         let prover = CachedOrchardProver::new();
         wallet
             .shielded_unshield_to(&coordinator, account, &to_addr_str, amount, &prover)
             .await
     });
+    let result = unwrap_result_or_return!(join_result);
     if let Err(e) = result {
         return PlatformWalletFFIResult::err(
             PlatformWalletFFIResultCode::ErrorWalletOperation,
@@ -224,7 +227,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_withdraw(
         Err(result) => return result,
     };
 
-    let result = block_on_worker(async move {
+    let join_result = block_on_worker(async move {
         let prover = CachedOrchardProver::new();
         wallet
             .shielded_withdraw_to(
@@ -237,6 +240,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_withdraw(
             )
             .await
     });
+    let result = unwrap_result_or_return!(join_result);
     if let Err(e) = result {
         return PlatformWalletFFIResult::err(
             PlatformWalletFFIResultCode::ErrorWalletOperation,
@@ -304,7 +308,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_shield(
     // and crashes with EXC_BAD_ACCESS at the first
     // `synthesize(... measure(pass))` call when polled on the
     // calling thread.
-    let result = block_on_worker(async move {
+    let join_result = block_on_worker(async move {
         // SAFETY: re-materialize the borrow under the caller's
         // documented lifetime contract; valid for the duration of
         // this synchronously-awaited task.
@@ -320,6 +324,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_shield(
             )
             .await
     });
+    let result = unwrap_result_or_return!(join_result);
     if let Err(e) = result {
         return PlatformWalletFFIResult::err(
             PlatformWalletFFIResultCode::ErrorWalletOperation,
@@ -401,7 +406,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_fund_from_asset_lock(
     // and crashes with EXC_BAD_ACCESS at the first
     // `synthesize(... measure(pass))` call when polled on the
     // calling thread.
-    let result = block_on_worker(async move {
+    let join_result = block_on_worker(async move {
         // SAFETY: see the fn-level safety doc — the resolver handle
         // is pinned alive for the duration of this FFI call.
         let asset_lock_signer = unsafe {
@@ -425,6 +430,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_fund_from_asset_lock(
             )
             .await
     });
+    let result = unwrap_result_or_return!(join_result);
     if let Err(e) = result {
         return PlatformWalletFFIResult::err(
             PlatformWalletFFIResultCode::ErrorWalletOperation,
@@ -493,7 +499,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_resume_fund_from_asset
 
     let core_signer_addr = core_signer_handle as usize;
 
-    let result = block_on_worker(async move {
+    let join_result = block_on_worker(async move {
         // SAFETY: see the fn-level safety doc — the resolver handle
         // is pinned alive for the duration of this FFI call.
         let asset_lock_signer = unsafe {
@@ -516,6 +522,7 @@ pub unsafe extern "C" fn platform_wallet_manager_shielded_resume_fund_from_asset
             )
             .await
     });
+    let result = unwrap_result_or_return!(join_result);
     if let Err(e) = result {
         return PlatformWalletFFIResult::err(
             PlatformWalletFFIResultCode::ErrorWalletOperation,

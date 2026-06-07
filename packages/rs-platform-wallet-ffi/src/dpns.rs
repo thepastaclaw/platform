@@ -70,7 +70,8 @@ pub unsafe extern "C" fn platform_wallet_register_dpns_name_with_signer(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let full_name = unwrap_result_or_return!(result);
     let cstr = unwrap_result_or_return!(CString::new(full_name));
     unsafe { *out_full_domain_name = cstr.into_raw() };
@@ -99,7 +100,8 @@ pub unsafe extern "C" fn platform_wallet_resolve_dpns_name(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.resolve_name(&name_str).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let resolved = unwrap_result_or_return!(result);
     match resolved {
         Some(id) => unsafe {
@@ -143,7 +145,8 @@ pub unsafe extern "C" fn platform_wallet_search_dpns_names(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.search_names(&prefix_str, sdk_limit).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let list = unwrap_result_or_return!(result);
 
     use dash_sdk::platform::dpns_usernames::DpnsUsername;
@@ -221,7 +224,8 @@ pub unsafe extern "C" fn platform_wallet_sync_dpns_names(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.sync_dpns_names(&id).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let added = unwrap_result_or_return!(result);
     if !out_added.is_null() {
         unsafe { *out_added = added };
@@ -406,7 +410,8 @@ pub unsafe extern "C" fn platform_wallet_fetch_contest_vote_state(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.contest_vote_state(&id, &label_str).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let state_opt = unwrap_result_or_return!(result);
     match state_opt {
         Some(state) => {
@@ -511,7 +516,8 @@ pub unsafe extern "C" fn platform_wallet_sync_contested_dpns_names(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.sync_contested_dpns_names(&id).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let labels = unwrap_result_or_return!(result);
     if !out_count.is_null() {
         unsafe { *out_count = labels.len() as u32 };

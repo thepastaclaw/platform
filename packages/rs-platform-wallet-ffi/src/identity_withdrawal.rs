@@ -48,7 +48,7 @@ pub unsafe extern "C" fn platform_wallet_withdraw_credits_with_signer(
                     .require_network(wallet_network)
                     .map_err(PlatformWalletFFIResult::from)?;
                 let identity_wallet = wallet.identity().clone();
-                Ok(block_on_worker(async move {
+                block_on_worker(async move {
                     let signer: &VTableSigner = &*(signer_addr as *const VTableSigner);
                     identity_wallet
                         .withdraw_credits_with_external_signer(
@@ -59,7 +59,7 @@ pub unsafe extern "C" fn platform_wallet_withdraw_credits_with_signer(
                             None,
                         )
                         .await
-                }))
+                })
             },
         );
     let inner = unwrap_option_or_return!(option);

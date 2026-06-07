@@ -88,7 +88,8 @@ pub unsafe extern "C" fn platform_wallet_transfer_credits_with_signer(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     unwrap_result_or_return!(result);
     PlatformWalletFFIResult::ok()
 }
@@ -159,7 +160,8 @@ pub unsafe extern "C" fn platform_wallet_transfer_credits_to_addresses_with_sign
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let new_balance = unwrap_result_or_return!(result);
     if !out_new_balance.is_null() {
         *out_new_balance = new_balance;

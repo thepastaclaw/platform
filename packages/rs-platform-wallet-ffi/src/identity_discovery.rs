@@ -102,7 +102,8 @@ pub unsafe extern "C" fn platform_wallet_discover_identities(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.discover(opts).await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let found = unwrap_result_or_return!(result);
     if found.is_empty() {
         return PlatformWalletFFIResult::ok();

@@ -168,7 +168,8 @@ pub unsafe extern "C" fn platform_wallet_sync_dashpay_profiles(
         let identity = wallet.identity().clone();
         block_on_worker(async move { identity.sync_profiles().await })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let count = unwrap_result_or_return!(result);
     if !out_synced_count.is_null() {
         unsafe { *out_synced_count = count };
@@ -230,7 +231,8 @@ pub unsafe extern "C" fn platform_wallet_create_or_update_dashpay_profile_with_s
             }
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let profile = unwrap_result_or_return!(result);
     *out_profile = DashPayProfileFFI::from_profile(&profile);
     PlatformWalletFFIResult::ok()

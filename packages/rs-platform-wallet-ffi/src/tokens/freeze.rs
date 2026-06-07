@@ -76,7 +76,8 @@ pub unsafe extern "C" fn platform_wallet_token_freeze(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     unwrap_result_or_return!(result);
     PlatformWalletFFIResult::ok()
 }

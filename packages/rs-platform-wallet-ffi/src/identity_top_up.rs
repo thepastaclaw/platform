@@ -125,7 +125,8 @@ pub unsafe extern "C" fn platform_wallet_top_up_from_addresses_with_signer(
                 .await
         })
     });
-    let result = unwrap_option_or_return!(option);
+    let join_result = unwrap_option_or_return!(option);
+    let result = unwrap_result_or_return!(join_result);
     let new_balance = unwrap_result_or_return!(result);
     *out_new_balance = new_balance;
     PlatformWalletFFIResult::ok()
