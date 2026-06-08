@@ -331,6 +331,18 @@ pub async fn sync_address_balances<P: AddressProvider>(
     for (tag, address) in provider.pending_addresses() {
         key_to_tag.insert(address.to_bytes(), (tag, address));
     }
+    // Defensive fold: `AddressProvider::current_balances()` documents
+    // that its yield is a subset of `pending_addresses()`, but a
+    // provider that briefly violates the invariant (e.g. mid-rebalance
+    // between two internal sets) would otherwise see incremental
+    // deltas for those addresses silently dropped at the end-of-pass
+    // refresh. `entry().or_insert` keeps this a no-op when the
+    // invariant holds.
+    for (tag, address, _funds) in provider.current_balances() {
+        key_to_tag
+            .entry(address.to_bytes())
+            .or_insert((tag, address));
+    }
 
     // Initialize result
     let mut result: AddressSyncResult<P::Tag, P::Address> = AddressSyncResult::new();
@@ -788,16 +800,22 @@ async fn apply_block_changes<'a, P, I>(
 
             if new_balance != current_balance {
                 // Incremental RPCs carry only balance deltas, never nonces,
-                // so an address first seen via catch-up records nonce=0 here.
-                // That synthesized value is cosmetic: it is never broadcast.
-                // Every spend path re-fetches the authoritative nonce at
-                // build time (`fetch_inputs_with_nonce` + `nonce_inc`), so
-                // the on-chain nonce — not this field — is what lands in a
-                // transition. A receive-only address genuinely has nonce 0;
-                // a spent-from address's true nonce is recovered by that
-                // build-time fetch. If this field ever needs to be
+                // so an address first seen via catch-up records nonce=0
+                // here. That zero is NON-AUTHORITATIVE. Callers may
+                // persist or round-trip it through `AddressFunds` storage,
+                // but they MUST NOT display it as the address's nonce nor
+                // treat it as authoritative anywhere — the only correct
+                // source of an address's current nonce is a fresh
+                // `AddressFunds` fetch. Every spend path re-fetches the
+                // on-chain nonce at transition-build time
+                // (`fetch_inputs_with_nonce` + `nonce_inc`), so the
+                // broadcast value is always the chain's, never this
+                // synthesized 0. A receive-only address genuinely has
+                // nonce 0; a spent-from address's true nonce is recovered
+                // by that build-time fetch. To make this field
                 // authoritative for display, model it as `Option<u32>` and
-                // fetch `AddressFunds` for catch-up-discovered addresses.
+                // fetch the full `AddressFunds` for catch-up-discovered
+                // addresses.
                 let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
                 let funds = AddressFunds {
                     nonce,
@@ -840,11 +858,25 @@ async fn apply_block_changes<'a, P, I>(
     }
 }
 
-/// Maximum number of refresh+replay rounds. The loop iterates so a
-/// `pending_addresses()` set that grows via `on_address_found`-triggered
-/// gap extension can be picked up in the same pass; the cap guards
-/// against any pathological livelock.
-const REPLAY_REFRESH_MAX_ITERATIONS: usize = 3;
+/// Livelock guard for the end-of-pass refresh + replay loop.
+///
+/// The loop exists so a `pending_addresses()` set that grows via
+/// `on_address_found`-triggered gap extension can be picked up in the
+/// same pass — each iteration that surfaces a new address gives the
+/// next iteration a chance to surface the gap-extended follow-on.
+/// The depth of that chain is bounded only by the provider's gap
+/// limit and the number of consecutive used addresses present in the
+/// incremental delta, so the cap must be high enough that a realistic
+/// deep gap-extension chain (≥ a typical HD-wallet gap limit of 20
+/// plus headroom) cannot saturate it.
+///
+/// This is a livelock guard, not a steady-state budget: the loop
+/// terminates naturally as soon as no new addresses are resolved in
+/// an iteration, so a wallet with a shallow chain only spends as many
+/// iterations as it needs. Hitting the cap means the chain is
+/// unusually deep AND every iteration is still making progress, which
+/// is worth surfacing.
+const REPLAY_REFRESH_MAX_ITERATIONS: usize = 32;
 
 /// End-of-pass recovery for addresses missing from the entry-time
 /// snapshot. Re-polls `pending_addresses()`, builds a small `extras` map
@@ -939,8 +971,12 @@ async fn refresh_and_replay_unknown<P: AddressProvider>(
             let new_balance = apply_op(borrow_op(change), current_balance, *height);
 
             if new_balance != current_balance {
-                // Same synthesized nonce=0 as the forward pass — cosmetic,
-                // never broadcast (see the note in `apply_block_changes`).
+                // Same synthesized nonce=0 as the forward pass: NON-AUTHORITATIVE.
+                // It may be persisted/round-tripped through `AddressFunds` storage
+                // but must never be displayed nor treated as the address's true
+                // nonce — the authoritative value is always re-fetched at
+                // transition-build time. See the note in `apply_block_changes`
+                // for the full contract.
                 let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
                 let funds = AddressFunds {
                     nonce,
@@ -984,9 +1020,19 @@ async fn refresh_and_replay_unknown<P: AddressProvider>(
     }
 
     if hit_iteration_cap {
-        debug!(
-            "Address sync: refresh+replay reached the {}-iteration cap; \
-             any further gap-extension addresses will surface on the next sync",
+        // Hitting the cap means every iteration was still resolving
+        // new addresses when we stopped — i.e. the gap-extension chain
+        // is at least `REPLAY_REFRESH_MAX_ITERATIONS` deep. The next
+        // sync is NOT guaranteed to recover any addresses past the cap
+        // (the buffered deltas are dropped at end-of-pass), so we
+        // surface this loudly. If this ever fires in practice, the cap
+        // needs to grow or the wallet needs an out-of-band rescan.
+        warn!(
+            "Address sync: refresh+replay reached the {}-iteration livelock cap; \
+             buffered balance changes for any further gap-extension addresses \
+             are being dropped — these addresses will only resurface if a \
+             future sync re-discovers them via the tree scan or sees a new \
+             delta for them, not via this pass's buffered changes",
             REPLAY_REFRESH_MAX_ITERATIONS
         );
     }
@@ -996,10 +1042,18 @@ async fn refresh_and_replay_unknown<P: AddressProvider>(
         .filter(|(key, _, _)| !resolved_keys.contains(key))
         .count();
     if still_unknown > 0 {
-        debug!(
+        // Whether these are foreign-wallet changes (expected, common on
+        // a shared chain) or addresses this wallet ought to track but
+        // hasn't surfaced (a real bug — e.g. provider gap limit too
+        // small) is not distinguishable from inside the sync engine.
+        // Warn so operators can correlate against wallet config rather
+        // than silently dropping the entries at debug level.
+        warn!(
             "Address sync: {} platform-reported balance change(s) reference \
-             address(es) not tracked by this wallet (refresh recovered {} \
-             other(s)); ignoring the untracked entries",
+             address(es) not tracked by this wallet after bounded replay \
+             (refresh recovered {} other(s)); these are either foreign-wallet \
+             addresses on a shared chain (benign) or a sign this wallet's \
+             provider isn't surfacing addresses it should",
             still_unknown, total_replay_applied
         );
     }
@@ -2196,6 +2250,348 @@ mod tests {
                 .iter()
                 .any(|(t, addr, f)| *t == 11 && *addr == b && f.balance == 2_222),
             "on_address_found must fire for B in the follow-on iteration"
+        );
+    }
+
+    /// A five-link gap-extension chain (A → B → C → D → E) where each
+    /// link is only exposed by the provider after `on_address_found`
+    /// fires for its predecessor. This chain is deeper than the
+    /// previous cap of 3 and would have silently dropped C, D, and E
+    /// before [`REPLAY_REFRESH_MAX_ITERATIONS`] was raised — see the
+    /// QE follow-up on PR #3650.
+    #[tokio::test]
+    async fn refresh_recovers_gap_extension_chain_deeper_than_old_cap() {
+        use async_trait::async_trait;
+
+        struct ChainProvider {
+            chain: [PlatformAddress; 5],
+            // Highest index whose predecessor has been observed via
+            // `on_address_found`. Starts at 0 (only A is initially
+            // exposed); increments by 1 each time a new link is found.
+            exposed_through: usize,
+            found_order: Vec<PlatformAddress>,
+        }
+
+        #[async_trait]
+        impl AddressProvider for ChainProvider {
+            type Tag = u32;
+            type Address = PlatformAddress;
+
+            fn gap_limit(&self) -> AddressIndex {
+                0
+            }
+
+            fn pending_addresses(&self) -> impl Iterator<Item = (Self::Tag, Self::Address)> + '_ {
+                // Expose only addresses up to and including the
+                // currently-exposed index. Each `on_address_found` fire
+                // shifts `exposed_through` forward by one — the next
+                // refresh iteration will then see the next link.
+                let upper = self.exposed_through;
+                self.chain
+                    .iter()
+                    .enumerate()
+                    .take(upper + 1)
+                    .map(|(i, addr)| (i as u32, *addr))
+            }
+
+            async fn on_address_found(
+                &mut self,
+                _tag: Self::Tag,
+                address: &Self::Address,
+                _funds: AddressFunds,
+            ) {
+                self.found_order.push(*address);
+                // When link N is observed, expose link N+1 (HD-wallet
+                // gap-extension simulation).
+                if let Some(idx) = self.chain.iter().position(|a| a == address) {
+                    if idx + 1 < self.chain.len() && idx >= self.exposed_through {
+                        self.exposed_through = idx + 1;
+                    }
+                }
+            }
+
+            async fn on_address_absent(&mut self, _tag: Self::Tag, _address: &Self::Address) {}
+
+            fn current_balances(
+                &self,
+            ) -> impl Iterator<Item = (Self::Tag, Self::Address, AddressFunds)> + '_ {
+                std::iter::empty()
+            }
+        }
+
+        let chain = [
+            p2pkh(0xA0),
+            p2pkh(0xA1),
+            p2pkh(0xA2),
+            p2pkh(0xA3),
+            p2pkh(0xA4),
+        ];
+
+        // Entry-time lookup is empty — every link is post-snapshot.
+        let lookup: HashMap<Vec<u8>, (u32, PlatformAddress)> = HashMap::new();
+
+        let mut provider = ChainProvider {
+            chain,
+            exposed_through: 0,
+            found_order: Vec::new(),
+        };
+        let mut result: AddressSyncResult<u32, PlatformAddress> = AddressSyncResult::new();
+
+        // Buffer one balance change per link so the replay path has
+        // something to apply for every iteration.
+        let pending_unknown: Vec<PendingMiss> = chain
+            .iter()
+            .enumerate()
+            .map(|(i, addr)| {
+                let op = BlockAwareCreditOperation::SetCredits(1_000 + (i as u64) * 100);
+                (addr.to_bytes(), OwnedBalanceOp::Compacted(op), 0)
+            })
+            .collect();
+
+        refresh_and_replay_unknown(&lookup, pending_unknown, &mut provider, &mut result).await;
+
+        // Every link in the chain must have its balance applied — the
+        // critical assertions are on C, D, E (indices 2, 3, 4) which
+        // require iterations 2, 3, 4 respectively and could not have
+        // been reached under the old cap of 3.
+        for (i, addr) in chain.iter().enumerate() {
+            let expected = 1_000 + (i as u64) * 100;
+            assert_eq!(
+                result.found.get(&(i as u32, *addr)).map(|f| f.balance),
+                Some(expected),
+                "link {} of the gap-extension chain must be recovered after the cap raise",
+                i
+            );
+        }
+
+        // Callbacks must fire for every link, in order.
+        assert_eq!(
+            provider.found_order.len(),
+            chain.len(),
+            "on_address_found must fire once per link"
+        );
+        for (i, addr) in chain.iter().enumerate() {
+            assert_eq!(
+                provider.found_order[i], *addr,
+                "callbacks must fire in chain order (link {})",
+                i
+            );
+        }
+    }
+
+    /// The Recent (per-block) op path must replay through the
+    /// end-of-pass refresh too, not just compacted. A receive-only
+    /// recent SetCredits for a post-snapshot address must surface as
+    /// `found` and fire `on_address_found` after refresh.
+    #[tokio::test]
+    async fn refresh_replays_recent_op_for_post_snapshot_address() {
+        use async_trait::async_trait;
+
+        struct LateRecentProvider {
+            late: PlatformAddress,
+            found: Vec<(u32, PlatformAddress, AddressFunds)>,
+        }
+
+        #[async_trait]
+        impl AddressProvider for LateRecentProvider {
+            type Tag = u32;
+            type Address = PlatformAddress;
+
+            fn gap_limit(&self) -> AddressIndex {
+                0
+            }
+
+            fn pending_addresses(&self) -> impl Iterator<Item = (Self::Tag, Self::Address)> + '_ {
+                std::iter::once((42u32, self.late))
+            }
+
+            async fn on_address_found(
+                &mut self,
+                tag: Self::Tag,
+                address: &Self::Address,
+                funds: AddressFunds,
+            ) {
+                self.found.push((tag, *address, funds));
+            }
+
+            async fn on_address_absent(&mut self, _tag: Self::Tag, _address: &Self::Address) {}
+
+            fn current_balances(
+                &self,
+            ) -> impl Iterator<Item = (Self::Tag, Self::Address, AddressFunds)> + '_ {
+                std::iter::empty()
+            }
+        }
+
+        let late = p2pkh(0x55);
+
+        // Apply a Recent op for an address that the entry-time
+        // lookup does not yet contain — exercises the Recent arm of
+        // the buffered miss + replay logic.
+        let lookup: HashMap<Vec<u8>, (u32, PlatformAddress)> = HashMap::new();
+
+        let mut provider = LateRecentProvider {
+            late,
+            found: Vec::new(),
+        };
+        let mut result: AddressSyncResult<u32, PlatformAddress> = AddressSyncResult::new();
+        let mut pending_unknown: Vec<PendingMiss> = Vec::new();
+
+        let op = CreditOperation::SetCredits(9_999);
+        let changes = [(&late, BalanceOp::Recent(&op))];
+        apply_block_changes(
+            &lookup,
+            changes.iter().map(|(a, c)| (*a, *c)),
+            0,
+            &mut provider,
+            &mut result,
+            &mut pending_unknown,
+        )
+        .await;
+
+        assert!(
+            provider.found.is_empty(),
+            "no on_address_found before end-of-pass refresh"
+        );
+        assert_eq!(
+            pending_unknown.len(),
+            1,
+            "recent miss is buffered for replay"
+        );
+        // Confirm the buffered op is a Recent variant — guards against
+        // a future refactor accidentally rewriting Recent→Compacted on
+        // the buffer push side.
+        assert!(
+            matches!(pending_unknown[0].1, OwnedBalanceOp::Recent(_)),
+            "buffered op must preserve the Recent variant"
+        );
+
+        refresh_and_replay_unknown(&lookup, pending_unknown, &mut provider, &mut result).await;
+
+        assert_eq!(
+            result.found.get(&(42u32, late)).map(|f| f.balance),
+            Some(9_999),
+            "recent op for a post-snapshot address must apply via refresh"
+        );
+        assert!(
+            provider
+                .found
+                .iter()
+                .any(|(t, a, f)| *t == 42 && *a == late && f.balance == 9_999),
+            "on_address_found must fire for the recovered recent-op address"
+        );
+    }
+
+    /// Compacted `AddToCreditsOperations` entries are filtered by
+    /// `height >= current_height`: deltas at heights below the
+    /// catch-up cursor are skipped (they belong to the prior
+    /// snapshot's balance), and deltas at or above are summed into
+    /// the current balance. The replay path must preserve the
+    /// original cursor height per buffered miss so this filter still
+    /// holds.
+    #[test]
+    fn apply_op_filters_compacted_add_to_credits_by_current_height() {
+        use std::collections::BTreeMap;
+
+        // Two deltas: one below the cursor (must be skipped), one at
+        // the cursor (must be added).
+        let ops: BTreeMap<u64, u64> = [(99, 100), (100, 250)].into_iter().collect();
+        let op = BlockAwareCreditOperation::AddToCreditsOperations(ops);
+        let after = apply_op(BalanceOp::Compacted(&op), 1_000, 100);
+        assert_eq!(
+            after, 1_250,
+            "only deltas at or above current_height should sum into the balance"
+        );
+
+        // All deltas above the cursor — every one sums in.
+        let ops: BTreeMap<u64, u64> = [(110, 10), (120, 20), (130, 30)].into_iter().collect();
+        let op = BlockAwareCreditOperation::AddToCreditsOperations(ops);
+        let after = apply_op(BalanceOp::Compacted(&op), 1_000, 100);
+        assert_eq!(after, 1_060, "all above-cursor deltas must add");
+
+        // All deltas below the cursor — every one filtered out, no
+        // balance movement.
+        let ops: BTreeMap<u64, u64> = [(10, 10), (20, 20), (30, 30)].into_iter().collect();
+        let op = BlockAwareCreditOperation::AddToCreditsOperations(ops);
+        let after = apply_op(BalanceOp::Compacted(&op), 1_000, 100);
+        assert_eq!(
+            after, 1_000,
+            "below-cursor deltas must NOT move the balance (they were in the snapshot)"
+        );
+
+        // Boundary check: cursor == height ⇒ included (>=, not >).
+        let ops: BTreeMap<u64, u64> = [(100, 7)].into_iter().collect();
+        let op = BlockAwareCreditOperation::AddToCreditsOperations(ops);
+        let after = apply_op(BalanceOp::Compacted(&op), 0, 100);
+        assert_eq!(after, 7, "the >= boundary must include the cursor height");
+    }
+
+    /// End-to-end variant of the previous test: the per-miss
+    /// `current_height` stamped at buffer-push time must be the
+    /// cursor used at refresh-replay time, so a compacted
+    /// `AddToCreditsOperations` filtered correctly in the forward
+    /// pass is also filtered correctly in the replay pass.
+    #[tokio::test]
+    async fn refresh_replay_preserves_per_miss_current_height_for_compacted_filter() {
+        use async_trait::async_trait;
+
+        struct LateProvider {
+            late: PlatformAddress,
+        }
+
+        #[async_trait]
+        impl AddressProvider for LateProvider {
+            type Tag = u32;
+            type Address = PlatformAddress;
+
+            fn gap_limit(&self) -> AddressIndex {
+                0
+            }
+
+            fn pending_addresses(&self) -> impl Iterator<Item = (Self::Tag, Self::Address)> + '_ {
+                std::iter::once((1u32, self.late))
+            }
+
+            async fn on_address_found(
+                &mut self,
+                _tag: Self::Tag,
+                _address: &Self::Address,
+                _funds: AddressFunds,
+            ) {
+            }
+
+            async fn on_address_absent(&mut self, _tag: Self::Tag, _address: &Self::Address) {}
+
+            fn current_balances(
+                &self,
+            ) -> impl Iterator<Item = (Self::Tag, Self::Address, AddressFunds)> + '_ {
+                std::iter::empty()
+            }
+        }
+
+        let late = p2pkh(0x77);
+        let lookup: HashMap<Vec<u8>, (u32, PlatformAddress)> = HashMap::new();
+        let mut provider = LateProvider { late };
+        let mut result: AddressSyncResult<u32, PlatformAddress> = AddressSyncResult::new();
+
+        // Buffer the miss with `current_height = 500`. The op carries
+        // one below-cursor delta (490 → must filter out) and one
+        // above-cursor delta (510 → must add).
+        let ops: std::collections::BTreeMap<u64, u64> =
+            [(490, 100), (510, 250)].into_iter().collect();
+        let op = BlockAwareCreditOperation::AddToCreditsOperations(ops);
+        let pending_unknown: Vec<PendingMiss> = vec![(
+            late.to_bytes(),
+            OwnedBalanceOp::Compacted(op),
+            /* current_height = */ 500,
+        )];
+
+        refresh_and_replay_unknown(&lookup, pending_unknown, &mut provider, &mut result).await;
+
+        assert_eq!(
+            result.found.get(&(1u32, late)).map(|f| f.balance),
+            Some(250),
+            "replay must reuse the buffered current_height so the >= filter holds"
         );
     }
 }

@@ -141,6 +141,21 @@ pub trait AddressProvider: Send {
     /// mode to provide base balances for applying `AddToCredits` delta
     /// operations.
     ///
+    /// # Invariant
+    ///
+    /// Every `(tag, address)` yielded here **must** also be yielded by
+    /// [`pending_addresses`](Self::pending_addresses) on the same
+    /// provider state. Said differently, `current_balances()` is a
+    /// `(tag, address, funds)`-shaped subset of `pending_addresses()`.
+    ///
+    /// The sync engine builds its entry-time key-to-tag lookup from
+    /// `pending_addresses()`; an address that only appears in
+    /// `current_balances()` would therefore be treated as foreign by
+    /// the catch-up phase and have its incremental balance deltas
+    /// silently dropped at the end-of-pass refresh. The engine folds
+    /// `current_balances()` into the lookup defensively, but providers
+    /// must not rely on that fold — keep the two sets consistent.
+    ///
     /// Returning an iterator rather than a slice means the provider
     /// does not have to maintain a flat cache in the slice's shape —
     /// it can yield from whatever internal structure it keeps. The
