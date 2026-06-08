@@ -522,16 +522,9 @@ async fn incremental_catch_up<P: AddressProvider>(
                     "Recent address balance changes query failed (non-fatal): {}",
                     e
                 );
-                // TODO(address-sync): a *transient* recent-query failure is
-                // indistinguishable here from "server lacks incremental RPCs".
-                // We advance new_sync_height to the tip and leave
-                // last_known_recent_block/new_sync_timestamp at 0 in both
-                // cases. For a transient failure that over-advances the
-                // watermark, so blocks between start_height and the tip are
-                // never re-queried. Distinguishing transient (retryable,
-                // keep the cursor) from unsupported (advance) needs a typed
-                // error classification not currently surfaced by the fetch
-                // layer; left unchanged to avoid risking the hot path.
+                // TODO(address-sync): transient recent-query failures are indistinguishable
+                // from unsupported incremental RPCs here. Typed fetch errors would let us
+                // keep the cursor for retry instead of advancing to the observed tip.
                 result.new_sync_height = current_height.max(observed_tip_height);
                 return Ok(());
             }
@@ -709,17 +702,9 @@ async fn incremental_catch_up<P: AddressProvider>(
     // flood on multi-wallet chains.
     refresh_and_replay_unknown(key_to_tag, pending_unknown, provider, result).await;
 
-    // TODO(address-sync): the watermark advances past every applied block
-    // unconditionally. If refresh_and_replay_unknown hits its livelock
-    // guard and drops a buffered delta for a wallet-owned address, that
-    // block's height is still committed here, so the next incremental
-    // RangeAfter sync starts past it and never re-reports the delta —
-    // recovery then requires a full rescan. Holding the watermark back to
-    // the lowest cap-dropped block would force re-query, but threading
-    // that signal out of refresh_and_replay_unknown risks perpetual
-    // re-querying / hot-path regression; left unchanged pending a deliberate
-    // sync-state design (the cap is set high enough that legitimate chains
-    // never hit it).
+    // TODO(address-sync): if replay-cap truncation drops wallet-owned deltas,
+    // this height is still committed, so RangeAfter skips them until full rescan.
+    // Holding back needs a safe truncation signal to avoid perpetual re-query.
     result.new_sync_height = current_height.max(observed_tip_height);
     // Store the highest block from the recent entries so the next sync can
     // use RangeAfter(this_height) for compaction detection.
@@ -820,26 +805,9 @@ async fn apply_block_changes<'a, P, I>(
             let new_balance = apply_op(change, current_balance, current_height);
 
             if new_balance != current_balance {
-                // INTENTIONAL — accepted risk, behavior deliberately kept.
-                // Incremental RPCs carry only balance deltas, never nonces,
-                // so an address first seen via catch-up records nonce=0 here.
-                // This synthesized 0 IS published on the public surface
-                // (AddressSyncResult / on_address_found) and IS durably
-                // persisted and round-tripped via the changeset entry
-                // (`PlatformAddressBalanceEntry`, defined in changeset.rs),
-                // yet it is non-authoritative: every spend re-fetches the
-                // on-chain nonce at build time (`fetch_inputs_with_nonce` +
-                // `nonce_inc`), so the on-chain value — not this field — lands
-                // in a transition. The managed-account reload keeps only the
-                // balance (`set_address_credit_balance` drops the nonce). A
-                // receive-only address genuinely has nonce 0; a spent-from
-                // address's true nonce is recovered by that build-time fetch.
-                // The only reader of the synthesized value is a
-                // self-documenting FFI display. CALLERS MUST NOT treat,
-                // display, or persist this as the authoritative nonce. Making
-                // it authoritative would mean modeling it as `Option<u32>` and
-                // fetching `AddressFunds` for catch-up-discovered addresses;
-                // that rework is deliberately not done.
+                // INTENTIONAL: incremental RPCs prove balance deltas, not nonces, so
+                // first-seen catch-up addresses publish/persist nonce=0 as a placeholder.
+                // Spends re-fetch on-chain nonce; callers must not treat it as authoritative.
                 let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
                 let funds = AddressFunds {
                     nonce,
@@ -882,15 +850,9 @@ async fn apply_block_changes<'a, P, I>(
     }
 }
 
-/// Livelock guard for the refresh+replay loop — NOT a functional limit
-/// on gap-extension depth. The loop iterates so a `pending_addresses()`
-/// set that grows via `on_address_found`-triggered gap extension is
-/// picked up in the same pass; each iteration must resolve at least one
-/// new address or the loop exits early, so a well-behaved provider never
-/// approaches this bound. The cap exists solely to bound a buggy or
-/// adversarial provider that keeps emitting ever-new pending addresses,
-/// turning the loop into a livelock. Set generously so legitimate deep
-/// chains complete in one pass.
+/// Livelock guard only: normal gap extension exits on zero progress before this.
+/// Kept finite to bound buggy providers that keep exposing new pending addresses.
+/// Large enough for legitimate deep chains to complete in one pass.
 const REPLAY_REFRESH_MAX_ITERATIONS: usize = 32;
 
 /// End-of-pass recovery for addresses missing from the entry-time
@@ -987,11 +949,9 @@ async fn refresh_and_replay_unknown<P: AddressProvider>(
             let new_balance = apply_op(borrow_op(change), current_balance, *height);
 
             if new_balance != current_balance {
-                // INTENTIONAL — accepted risk, behavior deliberately kept.
-                // Same synthesized nonce=0 as the forward pass: published and
-                // persisted but non-authoritative; every spend re-fetches the
-                // on-chain nonce. See the full note in `apply_block_changes`.
-                // Callers MUST NOT treat this as the authoritative nonce.
+                // INTENTIONAL: same nonce=0 placeholder as the forward pass.
+                // It is published/persisted but non-authoritative; spends re-fetch nonce.
+                // Callers must not treat it as authoritative.
                 let nonce = result.found.get(&result_key).map(|f| f.nonce).unwrap_or(0);
                 let funds = AddressFunds {
                     nonce,
