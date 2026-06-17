@@ -406,14 +406,17 @@ impl Sdk {
     /// ## Protocol version bootstrapping
     ///
     /// On a fresh auto-detect SDK (i.e. one built without [`SdkBuilder::with_version()`]), the
-    /// first call to this method uses the per-network [`min_protocol_version`] floor as a fallback
-    /// because no network response has been received yet to teach the SDK the real network version.
+    /// first call to this method uses the SDK's seeded protocol version as a fallback because
+    /// no network response has been received yet to teach the SDK the real network version. The
+    /// seed is either the per-network default `min_protocol_version` or the explicit override
+    /// supplied to [`SdkBuilder::with_initial_version()`] — which is honored as-is, including
+    /// values *below* the per-network default (no construction-time clamp).
     ///
     /// The actual network version is learned only *after* proof parsing succeeds, when
     /// [`Self::verify_response_metadata()`] processes `metadata.protocol_version`.  If the
     /// connected network runs an older protocol version **and** proof interpretation differs
-    /// between that version and the seeded [`min_protocol_version`], the very first request may
-    /// fail before the SDK can correct itself.  Subsequent requests will use the correct version.
+    /// between that version and the seeded one, the very first request may fail before the SDK
+    /// can correct itself.  Subsequent requests will use the correct version.
     ///
     /// This is a known bootstrap limitation.  Callers that must guarantee correct version
     /// behaviour on the first request should pin the version explicitly via
@@ -542,8 +545,8 @@ impl Sdk {
 
     /// Return [Dash Platform version](PlatformVersion) information used by this SDK.
     ///
-    /// With auto-detection (default) the SDK starts at the per-network
-    /// [`min_protocol_version`] (or the seed set via
+    /// With auto-detection (default) the SDK starts at the per-network default
+    /// `min_protocol_version` (or the seed set via
     /// [`SdkBuilder::with_initial_version`]) and then tracks the network's version
     /// — auto-detection only ever ratchets *upward* (`fetch_max`). A version pinned
     /// via [`SdkBuilder::with_version()`] is returned as pinned.
@@ -958,11 +961,11 @@ impl SdkBuilder {
     /// Select specific version of Dash Platform to use. This pins the version and
     /// disables auto-detection.
     ///
-    /// The pinned version is used as-is; it is not clamped to the per-network
-    /// [`min_protocol_version`].
+    /// The pinned version is used as-is; it is not clamped to the per-network default
+    /// `min_protocol_version`.
     ///
-    /// When unset, the SDK starts at the per-network [`min_protocol_version`] and
-    /// ratchets upward via auto-detection.
+    /// When unset, the SDK starts at the per-network default `min_protocol_version`
+    /// and ratchets upward via auto-detection.
     pub fn with_version(mut self, version: &'static PlatformVersion) -> Self {
         self.version = Some(version);
         self.version_pinned = true;
@@ -971,8 +974,8 @@ impl SdkBuilder {
 
     /// Override the initial protocol version seed while keeping auto-detect on.
     ///
-    /// Unpinned SDKs otherwise seed at the per-network [`min_protocol_version`] and
-    /// ratchet upward via `fetch_max` in `maybe_update_protocol_version` once the
+    /// Unpinned SDKs otherwise seed at the per-network default `min_protocol_version`
+    /// and ratchet upward via `fetch_max` in `maybe_update_protocol_version` once the
     /// network's version is observed. This replaces that seed with `version`.
     ///
     /// The seed is used verbatim — including versions *below* the per-network floor
@@ -2033,6 +2036,34 @@ mod test {
             "pinned version must not move"
         );
         assert_eq!(sdk.protocol_version_number(), pinned.protocol_version);
+    }
+
+    /// A proofs-disabled SDK ([`SdkBuilder::with_proofs`]`(false)`) opts out of the
+    /// only trusted source `refresh_protocol_version` would consult, so the call must
+    /// short-circuit to a no-op that returns the seeded version without issuing any
+    /// (necessarily unproven) query — succeeding even with no mock expectation
+    /// registered. Without that early return, `fetch_current` would attempt a
+    /// proofless query and panic the mock path.
+    #[tokio::test]
+    async fn test_refresh_proofs_disabled_returns_seed_without_query() {
+        let sdk = SdkBuilder::new_mock()
+            .with_proofs(false)
+            .build()
+            .expect("mock Sdk should be created");
+        let seeded = sdk.protocol_version_number();
+
+        // No expectation registered: the proofs-off branch must not even attempt
+        // the query, so this returns Ok with the seeded version unchanged.
+        let resulting = sdk
+            .refresh_protocol_version()
+            .await
+            .expect("proofs-disabled refresh is a no-op and must not error");
+
+        assert_eq!(
+            resulting, seeded,
+            "proofs-disabled refresh must return the seeded version unchanged"
+        );
+        assert_eq!(sdk.protocol_version_number(), seeded);
     }
 
     /// When the proven query is unavailable (no mock expectation, so the fetch
