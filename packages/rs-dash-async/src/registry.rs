@@ -307,6 +307,7 @@ impl<K: RegistryKey> ThreadRegistry<K> {
     /// New registry with an explicit orphan reap backstop (the wallet
     /// uses 1s — the same grace separates "finishing" from "wedged").
     pub fn with_reap_backstop(backstop: Duration) -> Arc<Self> {
+        warn_if_panic_abort_once();
         Arc::new(Self {
             slots: Mutex::new(BTreeMap::new()),
             orphans: Mutex::new(Vec::new()),
@@ -908,6 +909,32 @@ fn slot_alive(slot: &SlotState) -> bool {
     slot.cancel.is_some() || slot.handle.as_ref().is_some_and(|h| !h.is_finished())
 }
 
+/// One-shot warning emitted on the first [`ThreadRegistry`] creation when
+/// the crate was built with `panic = "abort"`. The [`EpilogueGuard`] and
+/// [`Repark`] drop-guards are the load-bearing mechanism behind the
+/// running-flag-clears-on-panic and re-park-on-drop guarantees; both rely
+/// on `Drop` running while the stack unwinds, which only happens under
+/// `panic = "unwind"`. Under `panic = "abort"` a worker panic aborts the
+/// process before any `Drop` can run — `is_running()` stays wedged, the
+/// slot can't be restarted, and `quiesce`'s re-park can't fire either.
+///
+/// We detect the strategy at compile time via stable `cfg(panic = ...)`
+/// rather than guessing at runtime, and log via a `Once` so a misconfigured
+/// build surfaces at registry creation without per-worker spam.
+fn warn_if_panic_abort_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        #[cfg(panic = "abort")]
+        tracing::warn!(
+            "dash_async::ThreadRegistry built with panic = \"abort\": the \
+             EpilogueGuard / Repark drop-guards cannot run during unwinding, \
+             so a panicking worker aborts the process before its running flag \
+             can clear (is_running() stays wedged, start() cannot relaunch a \
+             crashed loop) and a dropped quiesce cannot re-park its handle"
+        );
+    });
+}
+
 /// Re-park guard for [`ThreadRegistry::quiesce`]. If the poll-join future
 /// is dropped before it finishes (e.g. an outer timeout fires), this moves
 /// the slot's still-live handle into the orphan list instead of letting it
@@ -953,7 +980,11 @@ impl<K: RegistryKey> Drop for Repark<'_, K> {
 /// Panic-strategy caveat (same as `AtomicFlagGuard`): the clear-on-panic
 /// half relies on `Drop` running while the stack unwinds, so it holds under
 /// `panic = "unwind"`. Under `panic = "abort"` a worker panic aborts the
-/// process and there is no "after" to gate.
+/// process and there is no "after" to gate. The strategy is detected at
+/// compile time via stable `cfg(panic = ...)` and a misconfigured build
+/// surfaces as a one-shot `tracing::warn!` from
+/// [`warn_if_panic_abort_once`], emitted on the first registry
+/// creation — see that helper for the full rationale.
 struct EpilogueGuard<K: RegistryKey> {
     reg: Arc<ThreadRegistry<K>>,
     key: K,
@@ -1878,5 +1909,35 @@ mod tests {
 
         // gen-2 quiesces cleanly.
         assert_eq!(reg.quiesce("k").await, WorkerStatus::Ok);
+    }
+
+    /// The panic strategy is detected at compile time via stable
+    /// `cfg(panic = ...)` — exactly one of `unwind` / `abort` must be set,
+    /// and the one-shot warning helper must be safe to call repeatedly so
+    /// every `ThreadRegistry::new` along the warm path stays cheap.
+    ///
+    /// Cargo's test profile always builds with `panic = "unwind"`, so the
+    /// abort branch can't be observably exercised here. We instead anchor
+    /// the compile-time detection to a `cfg!` check the test will fail to
+    /// build under any future Rust where the cfg name changes, and verify
+    /// the idempotence of the helper and of registry construction.
+    #[test]
+    fn panic_strategy_detected_at_compile_time_and_warn_is_idempotent() {
+        let unwind = cfg!(panic = "unwind");
+        let abort = cfg!(panic = "abort");
+        assert!(
+            unwind ^ abort,
+            "exactly one panic strategy cfg must be active: unwind={unwind}, abort={abort}"
+        );
+        assert!(
+            unwind,
+            "cargo test always builds with panic = \"unwind\"; the abort \
+             branch is unreachable without a panic=abort build"
+        );
+        // Idempotent — `Once` is a hard requirement to avoid per-worker spam.
+        warn_if_panic_abort_once();
+        warn_if_panic_abort_once();
+        let _r1 = ThreadRegistry::<&str>::new();
+        let _r2 = ThreadRegistry::<&str>::with_reap_backstop(Duration::from_millis(50));
     }
 }
