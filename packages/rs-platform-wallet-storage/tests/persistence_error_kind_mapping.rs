@@ -128,6 +128,12 @@ fn tc_code_004_b_fatal_variants_map_to_fatal_kind() {
             WalletStorageError::Sqlite(rusqlite::Error::InvalidColumnIndex(0)),
         ),
         (
+            "DatabaseAlreadyOpen",
+            WalletStorageError::DatabaseAlreadyOpen {
+                path: PathBuf::from("/tmp/open.db"),
+            },
+        ),
+        (
             "IntegrityCheckFailed",
             WalletStorageError::IntegrityCheckFailed {
                 report: "bad".into(),

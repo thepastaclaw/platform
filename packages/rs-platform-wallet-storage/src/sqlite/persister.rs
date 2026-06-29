@@ -1,7 +1,8 @@
 //! [`SqlitePersister`] — the canonical `PlatformWalletPersistence` impl.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use rusqlite::{Connection, OptionalExtension};
 
@@ -16,6 +17,7 @@ use crate::sqlite::config::{FlushMode, SqlitePersisterConfig, Synchronous};
 use crate::sqlite::error::{AutoBackupOperation, WalletStorageError};
 use crate::sqlite::reports::{CommitReport, DeleteWalletReport};
 use crate::sqlite::schema;
+use crate::sqlite::util::canonicalize_path;
 use crate::sqlite::util::permissions::{apply_secure_permissions, precreate_secure};
 use crate::sqlite::util::safe_cast;
 
@@ -81,6 +83,7 @@ impl RetentionPolicy {
 /// SQLite-backed `PlatformWalletPersistence`.
 pub struct SqlitePersister {
     config: SqlitePersisterConfig,
+    canonical_db_path: PathBuf,
     // Single connection serializes reads through the write lock.
     // Acceptable for the current workload (per-wallet operations, small
     // read footprint); a read-only pool over the same WAL-mode file is
@@ -98,6 +101,57 @@ pub struct SqlitePersister {
     /// skip-backup semantics without provoking a real SQL error.
     #[cfg(any(test, feature = "__test-helpers"))]
     primed_pre_flush_error: Mutex<Option<WalletStorageError>>,
+}
+
+static OPEN_DB_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn open_db_paths() -> &'static Mutex<HashSet<PathBuf>> {
+    OPEN_DB_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+struct DbPathReservation {
+    path: Option<PathBuf>,
+}
+
+impl DbPathReservation {
+    fn reserve(path: PathBuf) -> Result<Self, WalletStorageError> {
+        let mut open_paths = open_db_paths()
+            .lock()
+            .map_err(|_| WalletStorageError::LockPoisoned)?;
+        if !open_paths.insert(path.clone()) {
+            return Err(WalletStorageError::DatabaseAlreadyOpen { path });
+        }
+        Ok(Self { path: Some(path) })
+    }
+
+    fn into_path(mut self) -> PathBuf {
+        self.path
+            .take()
+            .expect("database path reservation must hold a path")
+    }
+}
+
+impl Drop for DbPathReservation {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            release_db_path(&path);
+        }
+    }
+}
+
+fn release_db_path(path: &Path) {
+    match open_db_paths().lock() {
+        Ok(mut open_paths) => {
+            open_paths.remove(path);
+        }
+        Err(err) => {
+            tracing::error!(
+                target: "platform_wallet_storage",
+                path = %path.display(),
+                "SqlitePersister database path registry poisoned during release: {err}"
+            );
+        }
+    }
 }
 
 impl SqlitePersister {
@@ -122,6 +176,9 @@ impl SqlitePersister {
     ///   `PRAGMA integrity_check` on the pre-existing DB returned a
     ///   non-`ok` report. Raised BEFORE migrations alter the file so
     ///   corruption is never silently migrated.
+    /// - [`WalletStorageError::DatabaseAlreadyOpen`] — this process
+    ///   already has a live `SqlitePersister` for the same canonical DB
+    ///   path, including relative/symlink aliases.
     /// - [`WalletStorageError::Migration`] — refinery failed mid-run.
     /// - [`WalletStorageError::AutoBackupDirUnwritable`] /
     ///   [`WalletStorageError::AutoBackupDisabled`] — the
@@ -146,6 +203,8 @@ impl SqlitePersister {
         // when the DB already exists. Brings the SQLite path to parity
         // with the secrets-vault file path.
         precreate_secure(&config.path)?;
+        let canonical_db_path = canonicalize_path(&config.path)?;
+        let db_path_reservation = DbPathReservation::reserve(canonical_db_path)?;
 
         // Open the connection AND apply pragmas before checking for
         // pending migrations so the integrity probe sees the configured
@@ -204,6 +263,7 @@ impl SqlitePersister {
 
         Ok(Self {
             config,
+            canonical_db_path: db_path_reservation.into_path(),
             conn: Arc::new(Mutex::new(conn)),
             buffer: Buffer::new(),
             #[cfg(any(test, feature = "__test-helpers"))]
@@ -771,6 +831,8 @@ impl SqlitePersister {
 /// persisters are durable on every `store` so they never trip this.
 impl Drop for SqlitePersister {
     fn drop(&mut self) {
+        release_db_path(&self.canonical_db_path);
+
         if self.config.flush_mode != FlushMode::Manual {
             return;
         }

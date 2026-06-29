@@ -90,6 +90,9 @@ fn sqlite_oom() -> WalletStorageError {
 fn samples() -> Vec<WalletStorageError> {
     vec![
         WalletStorageError::Io(std::io::Error::other("boom")),
+        WalletStorageError::DatabaseAlreadyOpen {
+            path: PathBuf::from("/tmp/open.db"),
+        },
         sqlite_busy(),
         sqlite_locked(),
         sqlite_corrupt(),
@@ -212,6 +215,7 @@ fn tc_p2_005_is_transient_table() {
             WalletStorageError::FlushRetryable { .. } => (true, "flush_retryable"),
             WalletStorageError::Io(_) => (false, "io"),
             WalletStorageError::Migration(_) => (false, "migration"),
+            WalletStorageError::DatabaseAlreadyOpen { .. } => (false, "database_already_open"),
             WalletStorageError::IntegrityCheckFailed { .. } => (false, "integrity_check_failed"),
             WalletStorageError::IntegrityCheckRunFailed { .. } => {
                 (false, "integrity_check_run_failed")

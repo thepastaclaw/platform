@@ -142,6 +142,81 @@ fn tc_code_029_3_busy_timeout_zero_warns() {
     );
 }
 
+#[test]
+fn should_reject_second_live_open_for_same_database_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("w.db");
+    let first = SqlitePersister::open(SqlitePersisterConfig::new(&path)).unwrap();
+
+    let err = match SqlitePersister::open(SqlitePersisterConfig::new(&path)) {
+        Ok(_) => panic!("expected second open for same path to fail"),
+        Err(err) => err,
+    };
+    match err {
+        WalletStorageError::DatabaseAlreadyOpen { path: open_path } => {
+            assert_eq!(open_path, path.canonicalize().unwrap());
+        }
+        other => panic!("expected DatabaseAlreadyOpen, got {other:?}"),
+    }
+
+    drop(first);
+}
+
+#[test]
+fn should_release_same_process_open_guard_when_persister_drops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("w.db");
+    let first = SqlitePersister::open(SqlitePersisterConfig::new(&path)).unwrap();
+    drop(first);
+
+    SqlitePersister::open(SqlitePersisterConfig::new(&path))
+        .expect("expected reopen after drop to succeed");
+}
+
+#[test]
+fn should_reject_second_live_open_through_dot_dot_alias() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alias_parent = tmp.path().join("alias-parent");
+    std::fs::create_dir(&alias_parent).unwrap();
+    let path = tmp.path().join("w.db");
+    let alias = alias_parent.join("..").join("w.db");
+    let first = SqlitePersister::open(SqlitePersisterConfig::new(&path)).unwrap();
+
+    let err = match SqlitePersister::open(SqlitePersisterConfig::new(&alias)) {
+        Ok(_) => panic!("expected dot-dot alias open to fail"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, WalletStorageError::DatabaseAlreadyOpen { .. }),
+        "expected DatabaseAlreadyOpen for dot-dot alias, got {err:?}"
+    );
+
+    drop(first);
+}
+
+#[cfg(unix)]
+#[test]
+fn should_reject_second_live_open_through_symlink_alias() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("w.db");
+    let first = SqlitePersister::open(SqlitePersisterConfig::new(&path)).unwrap();
+    let alias = tmp.path().join("alias.db");
+    symlink(&path, &alias).unwrap();
+
+    let err = match SqlitePersister::open(SqlitePersisterConfig::new(&alias)) {
+        Ok(_) => panic!("expected symlink alias open to fail"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, WalletStorageError::DatabaseAlreadyOpen { .. }),
+        "expected DatabaseAlreadyOpen for symlink alias, got {err:?}"
+    );
+
+    drop(first);
+}
+
 /// TC-079: synchronous=Off is rejected at open with a typed error.
 #[test]
 fn tc079_synchronous_off_rejected() {

@@ -49,6 +49,13 @@ pub enum WalletStorageError {
     #[error("migration error")]
     Migration(#[from] refinery::Error),
 
+    /// A live [`SqlitePersister`](crate::SqlitePersister) in this
+    /// process already owns the same canonical database path. Opening a
+    /// second handle would create an independent in-memory buffer for
+    /// the same backing file.
+    #[error("database is already open in this process: {}", path.display())]
+    DatabaseAlreadyOpen { path: PathBuf },
+
     /// `PRAGMA integrity_check` ran successfully but reported a
     /// non-`ok` result. `report` carries SQLite's own diagnostic
     /// text — not a user-facing message, not a stringified source.
@@ -334,6 +341,7 @@ impl WalletStorageError {
             Self::Sqlite(_) => false,
             Self::Io(_)
             | Self::Migration(_)
+            | Self::DatabaseAlreadyOpen { .. }
             | Self::IntegrityCheckFailed { .. }
             | Self::IntegrityCheckRunFailed { .. }
             | Self::SourceOpenFailed { .. }
@@ -421,6 +429,7 @@ impl WalletStorageError {
             Self::FlushRetryable { .. } => "flush_retryable",
             Self::Io(_) => "io",
             Self::Migration(_) => "migration",
+            Self::DatabaseAlreadyOpen { .. } => "database_already_open",
             Self::IntegrityCheckFailed { .. } => "integrity_check_failed",
             Self::IntegrityCheckRunFailed { .. } => "integrity_check_run_failed",
             Self::SourceOpenFailed { .. } => "source_open_failed",
