@@ -325,6 +325,7 @@ pub unsafe extern "C" fn platform_wallet_create_or_update_dashpay_profile_with_s
 ) -> PlatformWalletFFIResult {
     check_ptr!(out_profile);
     check_ptr!(signer_handle);
+    *out_profile = DashPayProfileFFI::empty();
 
     let id = unwrap_result_or_return!(read_identifier(identity_id));
 
@@ -460,6 +461,47 @@ mod tests {
             assert_eq!(result.code, PlatformWalletFFIResultCode::NotFound);
 
             dashpay_profile_ffi_free(&mut out);
+        }
+    }
+
+    #[test]
+    fn create_or_update_profile_empties_out_profile_before_identity_decode_failure() {
+        unsafe {
+            let mut out = DashPayProfileFFI {
+                display_name: std::ptr::dangling_mut(),
+                public_message: std::ptr::dangling_mut(),
+                avatar_url: std::ptr::dangling_mut(),
+                avatar_hash_is_some: true,
+                avatar_hash: [0xAB; 32],
+                avatar_fingerprint_is_some: true,
+                avatar_fingerprint: [0xCD; 8],
+            };
+            let signer = std::ptr::dangling_mut::<SignerHandle>();
+
+            let result = platform_wallet_create_or_update_dashpay_profile_with_signer(
+                9_999_999,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                true,
+                signer,
+                &mut out,
+            );
+
+            assert_eq!(
+                result.code,
+                PlatformWalletFFIResultCode::ErrorInvalidIdentifier
+            );
+            assert!(out.display_name.is_null());
+            assert!(out.public_message.is_null());
+            assert!(out.avatar_url.is_null());
+            assert!(!out.avatar_hash_is_some);
+            assert_eq!(out.avatar_hash, [0u8; 32]);
+            assert!(!out.avatar_fingerprint_is_some);
+            assert_eq!(out.avatar_fingerprint, [0u8; 8]);
         }
     }
 }

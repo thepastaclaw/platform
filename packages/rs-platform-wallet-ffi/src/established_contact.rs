@@ -158,6 +158,7 @@ pub unsafe extern "C" fn established_contact_get_note(
     out_note: *mut *mut std::os::raw::c_char,
 ) -> PlatformWalletFFIResult {
     check_ptr!(out_note);
+    *out_note = std::ptr::null_mut();
 
     let option =
         ESTABLISHED_CONTACT_STORAGE.with_item(contact_handle, |contact| contact.note.clone());
@@ -166,6 +167,23 @@ pub unsafe extern "C" fn established_contact_get_note(
     let c_str = unwrap_result_or_return!(std::ffi::CString::new(note));
     unsafe { *out_note = c_str.into_raw() };
     PlatformWalletFFIResult::ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_note_nulls_out_note_before_handle_lookup_failure() {
+        unsafe {
+            let mut out_note = std::ptr::dangling_mut();
+
+            let result = established_contact_get_note(9_999_999, &mut out_note);
+
+            assert_eq!(result.code, PlatformWalletFFIResultCode::NotFound);
+            assert!(out_note.is_null());
+        }
+    }
 }
 
 /// Set the note for an established contact

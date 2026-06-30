@@ -548,10 +548,6 @@ public final class KeychainSigner: Signer, @unchecked Sendable {
                             UInt(dataRaw.count),
                             ecdsaSecp256k1KeyType,
                             self.network.ffiValue,
-                            // Address keys are bound by their own DIP-17
-                            // derivation; no extra pubkey-binding needed.
-                            nil,
-                            0,
                             bufPtr.baseAddress,
                             UInt(bufPtr.count),
                             &sigLen,
@@ -649,7 +645,7 @@ public final class KeychainSigner: Signer, @unchecked Sendable {
                         return sigBuf.withUnsafeMutableBufferPointer { bufPtr -> Int32 in
                             let dataBase = dataRaw.bindMemory(to: UInt8.self).baseAddress
                             let expBase = expRaw.bindMemory(to: UInt8.self).baseAddress
-                            return dash_sdk_sign_with_mnemonic_resolver_and_path(
+                            return dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
                                 self.mnemonicResolver.handle,
                                 walletPtr,
                                 pPtr,

@@ -101,13 +101,9 @@ impl Drop for WipingXprv {
 /// Other key types fail with
 /// [`SIGN_WITH_RESOLVER_ERR_UNSUPPORTED_KEY_TYPE`].
 ///
-/// When `expected_key_data` is non-null it binds the derived key to a
-/// known on-chain key BEFORE signing: the derived compressed public key
-/// (or, for a 20-byte `expected_key_data_len`, its `ripemd160_sha256`
-/// hash) must equal the supplied bytes, else
-/// [`SIGN_WITH_RESOLVER_ERR_PUBKEY_MISMATCH`] and no signature is
-/// produced. Pass null / `0` to skip the check (e.g. the address path,
-/// whose key is already bound by its own derivation).
+/// This legacy ABI does no expected-key binding. Use
+/// [`dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key`] when the
+/// derived key must be bound to a known on-chain key before signing.
 ///
 /// Returns `0` on success, `-1` on error. On error, `*out_error`
 /// is set to one of the `SIGN_WITH_RESOLVER_ERR_*` tags,
@@ -122,7 +118,8 @@ impl Drop for WipingXprv {
 ///   C-string for the duration of the call.
 /// - `data` must point at `data_len` readable bytes (may be zero
 ///   only if `data_len == 0`).
-/// - `expected_key_data`, when non-null, must point at
+/// - For [`dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key`],
+///   `expected_key_data`, when non-null, must point at
 ///   `expected_key_data_len` readable bytes (33 for a compressed
 ///   pubkey, 20 for its hash).
 /// - `out_signature` must point at `out_signature_capacity`
@@ -131,6 +128,77 @@ impl Drop for WipingXprv {
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn dash_sdk_sign_with_mnemonic_resolver_and_path(
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    wallet_id_bytes: *const u8,
+    derivation_path_cstr: *const c_char,
+    data: *const u8,
+    data_len: usize,
+    key_type: u8,
+    network: FFINetwork,
+    out_signature: *mut u8,
+    out_signature_capacity: usize,
+    out_signature_len: *mut usize,
+    out_error: *mut u8,
+) -> i32 {
+    unsafe {
+        sign_with_mnemonic_resolver_and_path_impl(
+            mnemonic_resolver_handle,
+            wallet_id_bytes,
+            derivation_path_cstr,
+            data,
+            data_len,
+            key_type,
+            network,
+            std::ptr::null(),
+            0,
+            out_signature,
+            out_signature_capacity,
+            out_signature_len,
+            out_error,
+        )
+    }
+}
+
+/// Versioned resolver signing ABI that can bind the derived key to an
+/// expected compressed public key or HASH160 before signing.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
+    mnemonic_resolver_handle: *mut MnemonicResolverHandle,
+    wallet_id_bytes: *const u8,
+    derivation_path_cstr: *const c_char,
+    data: *const u8,
+    data_len: usize,
+    key_type: u8,
+    network: FFINetwork,
+    expected_key_data: *const u8,
+    expected_key_data_len: usize,
+    out_signature: *mut u8,
+    out_signature_capacity: usize,
+    out_signature_len: *mut usize,
+    out_error: *mut u8,
+) -> i32 {
+    unsafe {
+        sign_with_mnemonic_resolver_and_path_impl(
+            mnemonic_resolver_handle,
+            wallet_id_bytes,
+            derivation_path_cstr,
+            data,
+            data_len,
+            key_type,
+            network,
+            expected_key_data,
+            expected_key_data_len,
+            out_signature,
+            out_signature_capacity,
+            out_signature_len,
+            out_error,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn sign_with_mnemonic_resolver_and_path_impl(
     mnemonic_resolver_handle: *mut MnemonicResolverHandle,
     wallet_id_bytes: *const u8,
     derivation_path_cstr: *const c_char,
@@ -170,6 +238,23 @@ pub unsafe extern "C" fn dash_sdk_sign_with_mnemonic_resolver_and_path(
     {
         return fail(SIGN_WITH_RESOLVER_ERR_NULL_POINTER);
     }
+
+    let expected_key_data = if expected_key_data.is_null() {
+        if expected_key_data_len == 0 {
+            None
+        } else {
+            return fail(SIGN_WITH_RESOLVER_ERR_NULL_POINTER);
+        }
+    } else {
+        match expected_key_data_len {
+            0 => return fail(SIGN_WITH_RESOLVER_ERR_PUBKEY_MISMATCH),
+            20 | 33 => Some(std::slice::from_raw_parts(
+                expected_key_data,
+                expected_key_data_len,
+            )),
+            _ => return fail(SIGN_WITH_RESOLVER_ERR_PUBKEY_MISMATCH),
+        }
+    };
 
     // secp256k1-only entry point: both ECDSA key types sign identically
     // (the type only describes the on-chain pubkey representation). Anything
@@ -254,17 +339,16 @@ pub unsafe extern "C" fn dash_sdk_sign_with_mnemonic_resolver_and_path(
     // never yield a valid signature under the wrong key. Mirrors the
     // discovery-time `validate_private_key_bytes` decision: 33-byte expected =
     // compressed pubkey equality; 20-byte expected = `ripemd160_sha256` of it.
-    if !expected_key_data.is_null() && expected_key_data_len > 0 {
-        let expected = std::slice::from_raw_parts(expected_key_data, expected_key_data_len);
+    if let Some(expected) = expected_key_data {
         let derived_pubkey = key_wallet::bip32::ExtendedPubKey::from_priv(&secp, &derived.0)
             .public_key
             .serialize();
-        let matches = match expected_key_data_len {
+        let matches = match expected.len() {
             33 => derived_pubkey.as_slice() == expected,
             20 => {
                 dash_sdk::dpp::util::hash::ripemd160_sha256(&derived_pubkey).as_slice() == expected
             }
-            _ => false,
+            _ => unreachable!("expected key length was validated before resolving"),
         };
         if !matches {
             return fail(SIGN_WITH_RESOLVER_ERR_PUBKEY_MISMATCH);
@@ -299,10 +383,12 @@ mod tests {
     use super::*;
     use rs_sdk_ffi::{dash_sdk_mnemonic_resolver_create, dash_sdk_mnemonic_resolver_destroy};
     use std::ffi::CString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// English BIP-39 test vector (all-zero entropy).
     const ENGLISH_PHRASE: &str =
         "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    static RESOLVE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
     unsafe extern "C" fn english_resolve(
         _ctx: *const c_void,
@@ -331,6 +417,17 @@ mod tests {
         mnemonic_resolver_result::NOT_FOUND
     }
 
+    unsafe extern "C" fn counting_resolve(
+        ctx: *const c_void,
+        wallet_id_bytes: *const u8,
+        out_buf: *mut c_char,
+        out_capacity: usize,
+        out_len: *mut usize,
+    ) -> i32 {
+        RESOLVE_CALLS.fetch_add(1, Ordering::SeqCst);
+        unsafe { english_resolve(ctx, wallet_id_bytes, out_buf, out_capacity, out_len) }
+    }
+
     unsafe extern "C" fn noop_destroy(_ctx: *mut c_void) {}
 
     fn make_resolver(cb: rs_sdk_ffi::MnemonicResolveCallback) -> *mut MnemonicResolverHandle {
@@ -355,8 +452,6 @@ mod tests {
                 data.len(),
                 0, // ECDSA_SECP256K1
                 FFINetwork::Testnet,
-                std::ptr::null(),
-                0,
                 sig_buf.as_mut_ptr(),
                 sig_buf.len(),
                 &mut sig_len,
@@ -388,8 +483,6 @@ mod tests {
                 data.len(),
                 0,
                 FFINetwork::Testnet,
-                std::ptr::null(),
-                0,
                 sig_buf.as_mut_ptr(),
                 sig_buf.len(),
                 &mut sig_len,
@@ -420,8 +513,6 @@ mod tests {
                 data.len(),
                 1, // BLS12_381 — not supported
                 FFINetwork::Testnet,
-                std::ptr::null(),
-                0,
                 sig_buf.as_mut_ptr(),
                 sig_buf.len(),
                 &mut sig_len,
@@ -430,6 +521,81 @@ mod tests {
         };
         assert_eq!(rc, -1);
         assert_eq!(err, SIGN_WITH_RESOLVER_ERR_UNSUPPORTED_KEY_TYPE);
+        unsafe { dash_sdk_mnemonic_resolver_destroy(resolver) };
+    }
+
+    #[test]
+    fn bound_key_rejects_null_expected_pointer_with_nonzero_len_before_resolving() {
+        RESOLVE_CALLS.store(0, Ordering::SeqCst);
+        let resolver = make_resolver(counting_resolve);
+        let path = CString::new("m/9'/1'/5'/0'/0'/0'/0'").unwrap();
+        let wallet_id = [0u8; 32];
+        let data = b"x";
+        let mut sig_buf = [0xAAu8; 128];
+        let mut sig_len: usize = 99;
+        let mut err: u8 = 0;
+
+        let rc = unsafe {
+            dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
+                resolver,
+                wallet_id.as_ptr(),
+                path.as_ptr(),
+                data.as_ptr(),
+                data.len(),
+                0,
+                FFINetwork::Testnet,
+                std::ptr::null(),
+                33,
+                sig_buf.as_mut_ptr(),
+                sig_buf.len(),
+                &mut sig_len,
+                &mut err,
+            )
+        };
+
+        assert_eq!(rc, -1);
+        assert_eq!(err, SIGN_WITH_RESOLVER_ERR_NULL_POINTER);
+        assert_eq!(sig_len, 0);
+        assert_eq!(RESOLVE_CALLS.load(Ordering::SeqCst), 0);
+        assert!(sig_buf.iter().all(|b| *b == 0));
+        unsafe { dash_sdk_mnemonic_resolver_destroy(resolver) };
+    }
+
+    #[test]
+    fn bound_key_rejects_nonnull_expected_pointer_with_zero_len_before_resolving() {
+        RESOLVE_CALLS.store(0, Ordering::SeqCst);
+        let resolver = make_resolver(counting_resolve);
+        let path = CString::new("m/9'/1'/5'/0'/0'/0'/0'").unwrap();
+        let wallet_id = [0u8; 32];
+        let data = b"x";
+        let expected = [0x02u8; 33];
+        let mut sig_buf = [0xAAu8; 128];
+        let mut sig_len: usize = 99;
+        let mut err: u8 = 0;
+
+        let rc = unsafe {
+            dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
+                resolver,
+                wallet_id.as_ptr(),
+                path.as_ptr(),
+                data.as_ptr(),
+                data.len(),
+                0,
+                FFINetwork::Testnet,
+                expected.as_ptr(),
+                0,
+                sig_buf.as_mut_ptr(),
+                sig_buf.len(),
+                &mut sig_len,
+                &mut err,
+            )
+        };
+
+        assert_eq!(rc, -1);
+        assert_eq!(err, SIGN_WITH_RESOLVER_ERR_PUBKEY_MISMATCH);
+        assert_eq!(sig_len, 0);
+        assert_eq!(RESOLVE_CALLS.load(Ordering::SeqCst), 0);
+        assert!(sig_buf.iter().all(|b| *b == 0));
         unsafe { dash_sdk_mnemonic_resolver_destroy(resolver) };
     }
 
@@ -469,7 +635,7 @@ mod tests {
         // Pass the expected pubkey so the binding check also runs on the happy
         // path (it must accept the key derived at this path).
         let rc = unsafe {
-            dash_sdk_sign_with_mnemonic_resolver_and_path(
+            dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
                 resolver,
                 wallet_id.as_ptr(),
                 path.as_ptr(),
@@ -512,7 +678,7 @@ mod tests {
         let mut sig_len: usize = 0;
         let mut err: u8 = 0;
         let rc = unsafe {
-            dash_sdk_sign_with_mnemonic_resolver_and_path(
+            dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
                 resolver,
                 wallet_id.as_ptr(),
                 path.as_ptr(),
@@ -564,7 +730,7 @@ mod tests {
         let mut sig_len: usize = 0;
         let mut err: u8 = 0;
         let rc = unsafe {
-            dash_sdk_sign_with_mnemonic_resolver_and_path(
+            dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
                 resolver,
                 wallet_id.as_ptr(),
                 path.as_ptr(),
@@ -602,7 +768,7 @@ mod tests {
         let mut sig_len: usize = 0;
         let mut err: u8 = 0;
         let rc = unsafe {
-            dash_sdk_sign_with_mnemonic_resolver_and_path(
+            dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
                 resolver,
                 wallet_id.as_ptr(),
                 path.as_ptr(),
@@ -640,7 +806,7 @@ mod tests {
         let mut sig_len: usize = 0;
         let mut err: u8 = 0;
         let rc = unsafe {
-            dash_sdk_sign_with_mnemonic_resolver_and_path(
+            dash_sdk_sign_with_mnemonic_resolver_and_path_bound_key(
                 resolver,
                 wallet_id.as_ptr(),
                 path.as_ptr(),

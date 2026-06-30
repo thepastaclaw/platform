@@ -173,6 +173,7 @@ pub unsafe extern "C" fn platform_wallet_sync_contact_requests(
     out_array: *mut ContactRequestHandleArray,
 ) -> PlatformWalletFFIResult {
     check_ptr!(out_array);
+    unsafe { *out_array = ContactRequestHandleArray::empty() };
 
     let option = PLATFORM_WALLET_STORAGE.with_item(wallet_handle, |wallet| {
         let identity = wallet.identity().clone();
@@ -481,6 +482,8 @@ pub unsafe extern "C" fn platform_wallet_fetch_sent_contact_requests(
     out_array: *mut ContactRequestHandleArray,
 ) -> PlatformWalletFFIResult {
     check_ptr!(out_array);
+    unsafe { *out_array = ContactRequestHandleArray::empty() };
+
     let id = unwrap_result_or_return!(unsafe { read_identifier(identity_id) });
 
     let option = PLATFORM_WALLET_STORAGE.with_item(wallet_handle, |wallet| {
@@ -983,5 +986,38 @@ mod tests {
         let r = unsafe { platform_wallet_pending_contact_crypto_count(0xDEAD_BEEF, &mut count) };
         assert_eq!(r.code, PlatformWalletFFIResultCode::NotFound);
         assert_eq!(count, 7, "out_count is untouched on a lookup miss");
+    }
+
+    #[test]
+    fn sync_contact_requests_empties_out_array_before_wallet_lookup_failure() {
+        let mut out = ContactRequestHandleArray {
+            handles: std::ptr::dangling_mut(),
+            count: 42,
+        };
+
+        let result = unsafe { platform_wallet_sync_contact_requests(9_999_999, &mut out) };
+
+        assert_eq!(result.code, PlatformWalletFFIResultCode::NotFound);
+        assert!(out.handles.is_null());
+        assert_eq!(out.count, 0);
+    }
+
+    #[test]
+    fn fetch_sent_contact_requests_empties_out_array_before_identity_decode_failure() {
+        let mut out = ContactRequestHandleArray {
+            handles: std::ptr::dangling_mut(),
+            count: 42,
+        };
+
+        let result = unsafe {
+            platform_wallet_fetch_sent_contact_requests(9_999_999, std::ptr::null(), &mut out)
+        };
+
+        assert_eq!(
+            result.code,
+            PlatformWalletFFIResultCode::ErrorInvalidIdentifier
+        );
+        assert!(out.handles.is_null());
+        assert_eq!(out.count, 0);
     }
 }
