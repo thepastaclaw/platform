@@ -88,6 +88,9 @@ class PlatformBalanceSyncService: ObservableObject {
     /// Mirrors the Rust manager's current `is_syncing` flag for the UI.
     private var syncStateCancellable: AnyCancellable?
 
+    /// Blocks manual sync re-entry while Clear is resetting persisted state.
+    private var isClearingPlatformAddressState = false
+
     // MARK: - Lifecycle
 
     /// Configure for a wallet. Call after wallet creation/switch.
@@ -227,6 +230,10 @@ class PlatformBalanceSyncService: ObservableObject {
         network: Network,
         walletIdsOnNetwork: Set<Data>
     ) async {
+        guard !isClearingPlatformAddressState else { return }
+        isClearingPlatformAddressState = true
+        defer { isClearingPlatformAddressState = false }
+
         // 1) Reset the Rust-owned state BEFORE touching disk. Without
         //    this the in-memory watermark survives and the next "Sync
         //    Now" resumes incrementally (fast) instead of doing a full
@@ -307,7 +314,7 @@ class PlatformBalanceSyncService: ObservableObject {
     /// whole call and the subscription never fires, so we have to
     /// reset locally regardless of outcome.
     func performSync() async {
-        guard !isSyncing else { return }
+        guard !isSyncing, !isClearingPlatformAddressState else { return }
         guard let walletManager = walletManager else {
             lastError = "Platform address wallet not configured"
             return

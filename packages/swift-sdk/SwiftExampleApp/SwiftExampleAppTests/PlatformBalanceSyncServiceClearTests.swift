@@ -27,21 +27,22 @@ final class PlatformBalanceSyncServiceClearTests: XCTestCase {
         // Active-network (testnet) row — must be ZEROED IN PLACE (kept, so
         // its durable derivation metadata survives for the rescan to
         // re-persist balances against).
-        context.insert(
-            PersistentPlatformAddress(
-                address: "yTestnetPlatformAddr",
-                addressType: 0,
-                addressHash: Data(repeating: 0x01, count: 20),
-                publicKey: Data(repeating: 0xab, count: 33),
-                accountIndex: 3,
-                addressIndex: 7,
-                derivationPath: "m/9'/1'/17'/3'/0'/7",
-                isUsed: true,
-                balance: 294_627_247_940,
-                nonce: 5,
-                walletId: testnetWalletId
-            )
+        let testnetAddress = PersistentPlatformAddress(
+            address: "yTestnetPlatformAddr",
+            addressType: 0,
+            addressHash: Data(repeating: 0x01, count: 20),
+            publicKey: Data(repeating: 0xab, count: 33),
+            accountIndex: 3,
+            addressIndex: 7,
+            derivationPath: "m/9'/1'/17'/3'/0'/7",
+            isUsed: true,
+            balance: 294_627_247_940,
+            nonce: 5,
+            walletId: testnetWalletId
         )
+        testnetAddress.firstSeenHeight = 123
+        testnetAddress.lastSeenHeight = 456
+        context.insert(testnetAddress)
         context.insert(
             PersistentPlatformAddressesSyncState(
                 walletId: Self.syncStateScopeId(for: .testnet),
@@ -95,7 +96,10 @@ final class PlatformBalanceSyncServiceClearTests: XCTestCase {
         XCTAssertEqual(testnetAddr.balance, 0, "balance zeroed")
         XCTAssertEqual(testnetAddr.nonce, 0, "nonce zeroed")
         XCTAssertFalse(testnetAddr.isUsed, "isUsed zeroed")
+        XCTAssertEqual(testnetAddr.firstSeenHeight, 0, "firstSeenHeight zeroed")
+        XCTAssertEqual(testnetAddr.lastSeenHeight, 0, "lastSeenHeight zeroed")
         XCTAssertEqual(testnetAddr.address, "yTestnetPlatformAddr", "durable address preserved")
+        XCTAssertEqual(testnetAddr.addressHash, Data(repeating: 0x01, count: 20), "durable address hash preserved")
         XCTAssertEqual(testnetAddr.publicKey, Data(repeating: 0xab, count: 33), "durable public key preserved")
         XCTAssertEqual(testnetAddr.derivationPath, "m/9'/1'/17'/3'/0'/7", "durable derivation path preserved")
         XCTAssertEqual(testnetAddr.accountIndex, 3, "durable account index preserved")
