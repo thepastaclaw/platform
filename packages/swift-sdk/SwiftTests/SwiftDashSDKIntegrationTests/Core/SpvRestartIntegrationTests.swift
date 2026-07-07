@@ -64,7 +64,7 @@ final class SpvRestartIntegrationTests: IntegrationTestCase {
         let recipientAddress = try receiver.getCoreWallet().nextReceiveAddress()
 
         let beforeTxids = try await readTxids()
-        _ = try sender.getCoreWallet().sendToAddresses(
+        _ = try sender.sendToAddresses(
             recipients: [(address: recipientAddress, amountDuffs: amount)]
         )
         guard let sendTxid = try await waitForNewTxid(notIn: beforeTxids) else {

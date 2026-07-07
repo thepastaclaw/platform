@@ -19,6 +19,35 @@ final class TestWalletWrapper {
         wallet
     }
 
+    /// Build, sign, and broadcast a BIP44 payment from this wallet,
+    /// returning the serialized signed transaction — the flow the
+    /// removed `ManagedCoreWallet.sendToAddresses` performed before
+    /// #3970 moved core sends onto `CoreTransactionBuilder`. Kept as a
+    /// test-support shorthand so the integration tests read as
+    /// "send X to Y" rather than five builder steps.
+    func sendToAddresses(
+        recipients: [(address: String, amountDuffs: UInt64)],
+        accountIndex: UInt32 = 0
+    ) throws -> Data {
+        let core = getCoreWallet()
+        let platform = getPlatformWallet()
+        let builder = try CoreTransactionBuilder(network: core.network())
+        for recipient in recipients {
+            try builder.addOutput(
+                address: recipient.address,
+                amountDuffs: recipient.amountDuffs
+            )
+        }
+        try builder.setFunding(
+            wallet: platform, accountType: .bip44, accountIndex: accountIndex
+        )
+        let signed = try builder.buildSigned(
+            wallet: platform, accountType: .bip44, accountIndex: accountIndex
+        )
+        _ = try core.broadcastTransaction(signed)
+        return signed.data
+    }
+
     func waitForSpendable(exactly duffs: UInt64, timeout: TimeInterval = 60) async throws {
         try await Wait.until(
             "wallet spendable == \(duffs) duffs",
