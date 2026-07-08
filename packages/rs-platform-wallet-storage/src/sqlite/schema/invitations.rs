@@ -96,7 +96,7 @@ pub fn read_all(
     conn: &Connection,
     wallet_id: &WalletId,
 ) -> Result<BTreeMap<OutPoint, InvitationEntry>, WalletStorageError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT outpoint, status, funding_index, amount_duffs, expiry_unix, created_at_secs, has_inviter \
          FROM invitations WHERE wallet_id = ?1",
     )?;
