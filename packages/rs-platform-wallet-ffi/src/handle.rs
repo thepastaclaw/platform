@@ -63,6 +63,18 @@ impl<T> HandleStorage<T> {
         self.items.write().remove(&handle)
     }
 
+    pub fn remove_or_reinsert<F, R>(&self, handle: Handle, f: F) -> Option<R>
+    where
+        F: FnOnce(T) -> (Option<T>, R),
+    {
+        let item = self.items.write().remove(&handle)?;
+        let (reinsert, result) = f(item);
+        if let Some(item) = reinsert {
+            self.items.write().insert(handle, item);
+        }
+        Some(result)
+    }
+
     pub fn with_item<F, R>(&self, handle: Handle, f: F) -> Option<R>
     where
         F: FnOnce(&T) -> R,
@@ -169,6 +181,33 @@ mod tests {
 
         let result = storage.with_item(handle, |item| item.clone());
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_handle_storage_remove_or_reinsert_keeps_handle_on_reinsert() {
+        let storage = HandleStorage::<String>::new();
+        let handle = storage.insert("test".to_string());
+
+        let result = storage.remove_or_reinsert(handle, |mut item| {
+            item.push_str("_kept");
+            (Some(item), "retry")
+        });
+
+        assert_eq!(result, Some("retry"));
+        let current = storage.with_item(handle, |item| item.clone());
+        assert_eq!(current, Some("test_kept".to_string()));
+    }
+
+    #[test]
+    fn test_handle_storage_remove_or_reinsert_drops_on_none() {
+        let storage = HandleStorage::<String>::new();
+        let handle = storage.insert("test".to_string());
+
+        let result = storage.remove_or_reinsert(handle, |item| (None, item));
+
+        assert_eq!(result, Some("test".to_string()));
+        let current = storage.with_item(handle, |item| item.clone());
+        assert_eq!(current, None);
     }
 
     #[test]

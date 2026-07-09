@@ -177,6 +177,9 @@ pub struct WorkerConfig {
     pub drain: Option<DrainHook>,
     /// Managed-join timeout for this worker.
     pub join_budget: Duration,
+    /// Optional stack size for OS-thread workers started via
+    /// [`ThreadRegistry::start_thread`]. Ignored by tokio-task workers.
+    pub stack_size: Option<usize>,
 }
 
 impl Default for WorkerConfig {
@@ -185,6 +188,7 @@ impl Default for WorkerConfig {
             weight: ShutdownWeight::default(),
             drain: None,
             join_budget: DEFAULT_JOIN_BUDGET,
+            stack_size: None,
         }
     }
 }
@@ -197,6 +201,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("weight", &self.weight)
             .field("drain", &self.drain.is_some())
             .field("join_budget", &self.join_budget)
+            .field("stack_size", &self.stack_size)
             .finish()
     }
 }
@@ -466,6 +471,7 @@ impl<K: RegistryKey> ThreadRegistry<K> {
             // cancellation token, bump generation, and write this start's
             // teardown config — all under THIS slot lock so a prior thread's
             // epilogue observes the post-swap generation.
+            let stack_size = cfg.stack_size;
             let (prior, token, my_gen) = slot.prepare(cfg);
 
             let reg = Arc::clone(self);
@@ -479,7 +485,7 @@ impl<K: RegistryKey> ThreadRegistry<K> {
             // clears this generation's running flag via the guard's Drop
             // (under `panic = "unwind"`), and the panic keeps unwinding so
             // the join handle still classifies as `Panicked`.
-            match self.spawn_os_thread(key, move || {
+            match self.spawn_os_thread(key, stack_size, move || {
                 let _epilogue = EpilogueGuard { reg, key, my_gen };
                 body(body_token);
             }) {
@@ -1019,7 +1025,12 @@ impl<K: RegistryKey> ThreadRegistry<K> {
     /// Spawn the named OS worker thread, surfacing a spawn failure as
     /// `io::Result` instead of panicking so the caller can roll back. The
     /// `#[cfg(test)]` seam forces a synthetic failure to exercise that path.
-    fn spawn_os_thread<C>(&self, key: K, closure: C) -> std::io::Result<std::thread::JoinHandle<()>>
+    fn spawn_os_thread<C>(
+        &self,
+        key: K,
+        stack_size: Option<usize>,
+        closure: C,
+    ) -> std::io::Result<std::thread::JoinHandle<()>>
     where
         C: FnOnce() + Send + 'static,
     {
@@ -1027,9 +1038,11 @@ impl<K: RegistryKey> ThreadRegistry<K> {
         if self.force_spawn_failure.load(Ordering::Acquire) {
             return Err(std::io::Error::other("forced spawn failure (test seam)"));
         }
-        std::thread::Builder::new()
-            .name(format!("tr-worker-{key:?}"))
-            .spawn(closure)
+        let mut builder = std::thread::Builder::new().name(format!("tr-worker-{key:?}"));
+        if let Some(stack_size) = stack_size {
+            builder = builder.stack_size(stack_size);
+        }
+        builder.spawn(closure)
     }
 
     /// Park a restarted key's prior handle into orphans. **Must be called
@@ -2004,6 +2017,7 @@ mod tests {
         assert_eq!(cfg.weight, ShutdownWeight(0));
         assert!(cfg.drain.is_none());
         assert_eq!(cfg.join_budget, DEFAULT_JOIN_BUDGET);
+        assert!(cfg.stack_size.is_none());
     }
 
     /// `hold_clearing(key)` refuses both `start_thread` and `start_task`
@@ -2217,6 +2231,7 @@ mod tests {
             weight: ShutdownWeight(7),
             join_budget: Duration::from_secs(11),
             drain: Some(hook),
+            stack_size: Some(2 * 1024 * 1024),
         };
         reg.start_thread("k", cfg1, wedged_body(release_rx));
         reg.cancel("k");
@@ -2228,6 +2243,7 @@ mod tests {
             weight: ShutdownWeight(99),
             join_budget: Duration::from_secs(99),
             drain: None,
+            stack_size: Some(3 * 1024 * 1024),
         };
         reg.start_thread("k", cfg2, |_cancel| {});
         reg.force_spawn_failure.store(false, Ordering::Release);

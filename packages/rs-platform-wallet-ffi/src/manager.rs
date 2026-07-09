@@ -353,47 +353,51 @@ pub unsafe extern "C" fn platform_wallet_manager_get_wallet(
 pub unsafe extern "C" fn platform_wallet_manager_destroy(
     handle: Handle,
 ) -> PlatformWalletFFIResult {
-    if let Some(manager) = PLATFORM_WALLET_MANAGER_STORAGE.remove(handle) {
-        // Run the full lifecycle shutdown to completion, not just the
-        // platform-address sync. Every background task (identity sync,
-        // shielded sync, the wallet-event adapter) can fire callbacks
-        // through the host-owned `context` pointer; once `destroy`
-        // returns the host may free that context, so no task may be
-        // left alive to fire a callback against freed memory.
-        // `shutdown()` is idempotent, so this is safe even if the host
-        // already stopped some sync managers before calling destroy.
-        let report = runtime().block_on(manager.shutdown());
-        if !report.all_clean() {
-            // A coordinator thread panicked, exceeded its join budget, or
-            // stayed detached — possibly a loop that raced this teardown and
-            // installed its cancellation after our first quiesce. Retry once:
-            // `shutdown()` re-quiesces (cancelling any now-installed loop) and
-            // re-joins, which clears that race. The host frees its callback
-            // context after we return, so a still-live worker is a real UAF
-            // hazard, not just noise.
-            tracing::warn!(
-                ?report,
-                "platform wallet manager shutdown did not join every coordinator \
-                 thread cleanly on the first pass; retrying"
-            );
-            let retry = runtime().block_on(manager.shutdown());
-            if !retry.all_clean() {
-                tracing::error!(
-                    ?retry,
-                    "platform wallet manager shutdown still could not join every \
-                     coordinator thread after a retry; a worker may outlive destroy"
+    PLATFORM_WALLET_MANAGER_STORAGE
+        .remove_or_reinsert(handle, |manager| {
+            // Run the full lifecycle shutdown to completion, not just the
+            // platform-address sync. Every background task (identity sync,
+            // shielded sync, the wallet-event adapter) can fire callbacks
+            // through the host-owned `context` pointer; once `destroy`
+            // succeeds the host may free that context, so no task may be
+            // left alive to fire a callback against freed memory.
+            // `shutdown()` is idempotent, so this is safe even if the host
+            // already stopped some sync managers before calling destroy.
+            let report = runtime().block_on(manager.shutdown());
+            if !report.all_clean() {
+                // A coordinator thread panicked, exceeded its join budget, or
+                // stayed detached. Retry once: `shutdown()` re-quiesces and
+                // re-joins, which can clear a worker that finished while the
+                // first pass was reporting.
+                tracing::warn!(
+                    ?report,
+                    "platform wallet manager shutdown did not join every coordinator \
+                     thread cleanly on the first pass; retrying"
                 );
-                return PlatformWalletFFIResult::err(
-                    PlatformWalletFFIResultCode::ErrorShutdownIncomplete,
-                    format!(
-                        "shutdown could not cleanly join all coordinator threads after \
-                         a retry: {retry:?}"
-                    ),
-                );
+                let retry = runtime().block_on(manager.shutdown());
+                if !retry.all_clean() {
+                    tracing::error!(
+                        ?retry,
+                        "platform wallet manager shutdown still could not join every \
+                         coordinator thread after a retry; keeping manager handle alive \
+                         for retry"
+                    );
+                    return (
+                        Some(manager),
+                        PlatformWalletFFIResult::err(
+                            PlatformWalletFFIResultCode::ErrorShutdownIncomplete,
+                            format!(
+                                "shutdown could not cleanly join all coordinator threads after \
+                                 a retry; manager handle remains valid for retry: {retry:?}"
+                            ),
+                        ),
+                    );
+                }
             }
-        }
-    }
-    PlatformWalletFFIResult::ok()
+
+            (None, PlatformWalletFFIResult::ok())
+        })
+        .unwrap_or_else(PlatformWalletFFIResult::ok)
 }
 
 /// Remove one wallet from the manager. Idempotent on missing wallets.

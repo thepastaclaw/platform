@@ -4,7 +4,6 @@ pub mod accessors;
 pub mod dashpay_sync;
 pub mod identity_sync;
 mod load;
-mod loop_cancel;
 pub mod platform_address_sync;
 #[cfg(feature = "shielded")]
 pub mod shielded_sync;
@@ -42,9 +41,10 @@ use crate::wallet::PlatformWallet;
 /// OS threads. The shared [`ThreadRegistry`] owns their join handles so
 /// [`shutdown`](PlatformWalletManager::shutdown) can join them — and
 /// surface a panicked loop — before the host drops the tokio runtime.
-/// Cancellation is NOT the registry's concern: each coordinator keeps its
-/// own `LoopCancelGuard`, which the registry sits alongside purely for the
-/// join / status handoff.
+/// Cancellation token installation, OS-thread spawn, and handle
+/// registration all run through [`ThreadRegistry::start_thread`], so
+/// shutdown / clear latches cannot race a thread that exists outside
+/// the registry's accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WalletWorker {
     /// Platform-address (BLAST / DIP-17) balance sync coordinator.
@@ -75,6 +75,7 @@ pub(crate) fn coordinator_worker_config() -> WorkerConfig {
         weight: COORDINATOR_WEIGHT,
         drain: None,
         join_budget: DEFAULT_JOIN_BUDGET,
+        stack_size: None,
     }
 }
 
@@ -146,10 +147,9 @@ pub struct PlatformWalletManager<P: PlatformWalletPersistence + 'static> {
     pub(super) event_adapter_cancel: CancellationToken,
     pub(super) event_adapter_join: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// Shared join/status registry for the periodic coordinator threads.
-    /// Each coordinator hands its OS-thread `JoinHandle` here at `start`;
-    /// [`shutdown`](Self::shutdown) joins them and reports per-worker
-    /// terminal status. Cancellation stays with each coordinator's
-    /// `LoopCancelGuard` — the registry only joins.
+    /// Each coordinator starts its OS thread through this registry;
+    /// [`shutdown`](Self::shutdown) cancels, joins, and reports
+    /// per-worker terminal status.
     pub(super) registry: Arc<ThreadRegistry<WalletWorker>>,
 }
 

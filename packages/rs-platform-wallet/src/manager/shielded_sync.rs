@@ -37,7 +37,6 @@ use tokio::sync::RwLock;
 use dash_async::ThreadRegistry;
 
 use crate::events::PlatformEventManager;
-use crate::manager::loop_cancel::LoopCancelGuard;
 use crate::manager::{coordinator_worker_config, WalletWorker};
 use crate::wallet::platform_wallet::WalletId;
 use crate::wallet::shielded::{NetworkShieldedCoordinator, ShieldedSyncSummary};
@@ -142,12 +141,8 @@ pub struct ShieldedSyncManager {
     /// run first, so an empty slot guarantees no shielded state
     /// exists).
     coordinator_slot: Arc<RwLock<Option<Arc<NetworkShieldedCoordinator>>>>,
-    /// Generation-guarded cancel-token slot for the background loop —
-    /// see [`LoopCancelGuard`] for the stale-loop shutdown invariant.
-    cancel_guard: LoopCancelGuard,
     /// Shared registry that owns this loop's OS-thread join handle for a
-    /// panic-aware shutdown join. Join-only — cancellation stays with
-    /// [`cancel_guard`](Self::cancel_guard).
+    /// panic-aware shutdown join and cancellation.
     registry: Arc<ThreadRegistry<WalletWorker>>,
     interval_secs: AtomicU64,
     is_syncing: AtomicBool,
@@ -171,7 +166,6 @@ impl ShieldedSyncManager {
         Self {
             event_manager,
             coordinator_slot,
-            cancel_guard: LoopCancelGuard::new(),
             registry,
             interval_secs: AtomicU64::new(DEFAULT_SYNC_INTERVAL_SECS),
             is_syncing: AtomicBool::new(false),
@@ -195,7 +189,7 @@ impl ShieldedSyncManager {
 
     /// Whether the background loop is currently running.
     pub fn is_running(&self) -> bool {
-        self.cancel_guard.is_running()
+        self.registry.is_running(WalletWorker::ShieldedSync)
     }
 
     /// Whether a sync pass is in flight right now.
@@ -225,36 +219,13 @@ impl ShieldedSyncManager {
     /// spinning up to the registry reap backstop (default 1 s) before
     /// returning. Call it from the FFI host thread, not an async task.
     pub fn start(self: Arc<Self>) {
-        // Refuse to (re)start while a clear is latched (a fresh pass could
-        // `persister.store(...)` notes into the store `clear_shielded` is
-        // about to wipe) or once teardown has latched `closing` (the registry
-        // does not own this loop's cancellation, so it would run uncancelled).
-        // The registry gates its own `register_thread` on both latches, but
-        // this loop's cancellation lives in `cancel_guard`, so the gate must
-        // also be observed here — before `install` spawns a thread.
-        if self.registry.is_closing() || self.registry.is_clearing(WalletWorker::ShieldedSync) {
-            return;
-        }
-        let Some((cancel, my_generation)) = self.cancel_guard.install() else {
-            return;
-        };
-        // Re-check AFTER install (check-lock-check): `clear_shielded` /
-        // `shutdown` may have latched between the gate above and `install`.
-        // Without this a fresh pass could re-persist notes right after the
-        // wipe. Cancel the just-installed token and release the slot rather
-        // than spawning.
-        if self.registry.is_closing() || self.registry.is_clearing(WalletWorker::ShieldedSync) {
-            cancel.cancel();
-            self.cancel_guard.clear_if_current(my_generation);
-            return;
-        }
-
         let handle = tokio::runtime::Handle::current();
         let registry = Arc::clone(&self.registry);
         let this = self;
-        let join = std::thread::Builder::new()
-            .name("shielded-sync".into())
-            .spawn(move || {
+        registry.start_thread(
+            WalletWorker::ShieldedSync,
+            coordinator_worker_config(),
+            move |cancel| {
                 handle.block_on(async move {
                     loop {
                         if cancel.is_cancelled() {
@@ -276,17 +247,8 @@ impl ShieldedSyncManager {
                             _ = cancel.cancelled() => break,
                         }
                     }
-
-                    this.cancel_guard.clear_if_current(my_generation);
                 });
-            })
-            .expect("failed to spawn shielded-sync thread");
-
-        // Join-only handoff to the shared registry (see `IdentitySyncManager::start`).
-        registry.register_thread(
-            WalletWorker::ShieldedSync,
-            coordinator_worker_config(),
-            join,
+            },
         );
     }
 
@@ -299,9 +261,7 @@ impl ShieldedSyncManager {
     /// nothing more will be persisted" barrier — required by Clear,
     /// unregister, and rebind — use [`quiesce`](Self::quiesce).
     pub fn stop(&self) {
-        if let Some(token) = self.cancel_guard.take() {
-            token.cancel();
-        }
+        self.registry.cancel(WalletWorker::ShieldedSync);
     }
 
     /// Cancel the background loop **and wait for any in-flight sync pass
