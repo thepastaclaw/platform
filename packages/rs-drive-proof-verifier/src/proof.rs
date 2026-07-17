@@ -38,9 +38,19 @@ use dapi_grpc::platform::v0::get_protocol_version_upgrade_vote_status_request::{
 };
 use dapi_grpc::platform::v0::security_level_map::KeyKindRequestType as GrpcKeyKind;
 use dapi_grpc::platform::v0::{
-    get_address_info_request, get_addresses_infos_request,
-    get_contested_resource_identity_votes_request, get_data_contract_history_request, get_data_contract_request, get_data_contracts_request, get_document_history_request, get_epochs_info_request, get_evonodes_proposed_epoch_blocks_by_ids_request, get_evonodes_proposed_epoch_blocks_by_range_request, get_finalized_epoch_infos_request, get_identities_balances_request, get_identities_contract_keys_request, get_identity_balance_and_revision_request, get_identity_balance_request, get_identity_by_non_unique_public_key_hash_request,
-    get_identity_by_public_key_hash_request, get_identity_contract_nonce_request, get_identity_keys_request, get_identity_nonce_request, get_identity_request, get_path_elements_request, get_prefunded_specialized_balance_request, GetContestedResourceVotersForIdentityRequest, GetContestedResourceVotersForIdentityResponse, GetPathElementsRequest, GetPathElementsResponse, GetProtocolVersionUpgradeStateRequest, GetProtocolVersionUpgradeStateResponse, GetProtocolVersionUpgradeVoteStatusRequest, GetProtocolVersionUpgradeVoteStatusResponse, Proof, ResponseMetadata
+    get_address_info_request, get_addresses_infos_request, get_data_contract_history_request,
+    get_data_contract_request, get_data_contracts_request, get_document_history_request,
+    get_epochs_info_request, get_evonodes_proposed_epoch_blocks_by_ids_request,
+    get_evonodes_proposed_epoch_blocks_by_range_request, get_finalized_epoch_infos_request,
+    get_identities_balances_request, get_identities_contract_keys_request,
+    get_identity_balance_and_revision_request, get_identity_balance_request,
+    get_identity_by_non_unique_public_key_hash_request, get_identity_by_public_key_hash_request,
+    get_identity_contract_nonce_request, get_identity_keys_request, get_identity_nonce_request,
+    get_identity_request, get_path_elements_request, get_prefunded_specialized_balance_request,
+    GetContestedResourceVotersForIdentityRequest, GetContestedResourceVotersForIdentityResponse,
+    GetPathElementsRequest, GetPathElementsResponse, GetProtocolVersionUpgradeStateRequest,
+    GetProtocolVersionUpgradeStateResponse, GetProtocolVersionUpgradeVoteStatusRequest,
+    GetProtocolVersionUpgradeVoteStatusResponse, Proof, ResponseMetadata,
 };
 use dapi_grpc::platform::{
     v0::{self as platform, key_request_type, KeyRequestType as GrpcKeyType},
@@ -2213,13 +2223,8 @@ impl FromProof<platform::GetContestedResourceIdentityVotesRequest> for Vote {
         Self: Sized + 'a,
     {
         let request = request.into();
-        let id_in_request = match request.version.as_ref().ok_or(Error::EmptyVersion)? {
-            get_contested_resource_identity_votes_request::Version::V0(v0) => {
-                Identifier::from_bytes(&v0.identity_id).map_err(|e| Error::RequestError {
-                    error: e.to_string(),
-                })?
-            }
-        };
+        let drive_query =
+            ContestedResourceVotesGivenByIdentityQuery::try_from_request(request.clone())?;
 
         let (maybe_votes, mtd, proof) = ResourceVotesByIdentity::maybe_from_proof_with_metadata(
             request,
@@ -2229,31 +2234,47 @@ impl FromProof<platform::GetContestedResourceIdentityVotesRequest> for Vote {
             provider,
         )?;
 
-        let (id, vote) = match maybe_votes {
-            Some(v) if v.len() > 1 => {
-                return Err(Error::ResponseDecodeError {
-                    error: format!("expected 1 vote, got {}", v.len()),
-                })
-            }
-            Some(v) if v.is_empty() => return Ok((None, mtd, proof)),
-            Some(v) => v
-                .into_iter()
-                .next()
-                .expect("is_empty() must detect empty map"),
-            None => return Ok((None, mtd, proof)),
-        };
-
-        if id != id_in_request {
-            return Err(Error::ResponseDecodeError {
-                error: format!(
-                    "expected vote for identity {}, got vote for identity {}",
-                    id_in_request, id
-                ),
-            });
-        }
-
-        Ok((vote.map(Vote::ResourceVote), mtd, proof))
+        Ok((
+            single_vote_from_resource_votes_by_identity(maybe_votes, &drive_query)?,
+            mtd,
+            proof,
+        ))
     }
+}
+
+fn single_vote_from_resource_votes_by_identity(
+    maybe_votes: Option<ResourceVotesByIdentity>,
+    drive_query: &ContestedResourceVotesGivenByIdentityQuery,
+) -> Result<Option<Vote>, Error> {
+    let (requested_vote_poll_id, _) = drive_query.start_at.ok_or_else(|| Error::RequestError {
+        error: "vote poll id must be provided for single vote proof validation".to_string(),
+    })?;
+    let requested_vote_poll_id = Identifier::new(requested_vote_poll_id);
+
+    let (returned_vote_poll_id, vote) = match maybe_votes {
+        Some(v) if v.len() > 1 => {
+            return Err(Error::ResponseDecodeError {
+                error: format!("expected 1 vote, got {}", v.len()),
+            })
+        }
+        Some(v) if v.is_empty() => return Ok(None),
+        Some(v) => v
+            .into_iter()
+            .next()
+            .expect("is_empty() must detect empty map"),
+        None => return Ok(None),
+    };
+
+    if returned_vote_poll_id != requested_vote_poll_id {
+        return Err(Error::ResponseDecodeError {
+            error: format!(
+                "expected vote for vote poll {}, got vote for vote poll {}",
+                requested_vote_poll_id, returned_vote_poll_id
+            ),
+        });
+    }
+
+    Ok(vote.map(Vote::ResourceVote))
 }
 
 impl FromProof<platform::GetTotalCreditsInPlatformRequest> for TotalCreditsInPlatform {
@@ -5872,6 +5893,112 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, Error::EmptyVersion), "got: {err:?}");
+    }
+
+    #[test]
+    fn vote_identity_vote_accepts_matching_returned_poll_key() {
+        let voter_identity_id = Identifier::new([0x11; 32]);
+        let requested_vote_poll_id = Identifier::new([0x22; 32]);
+        let drive_query = single_vote_query_scope(voter_identity_id, requested_vote_poll_id);
+
+        let mut votes = ResourceVotesByIdentity::new();
+        votes.insert(
+            requested_vote_poll_id,
+            Some(dpp::voting::votes::resource_vote::ResourceVote::default()),
+        );
+
+        let vote = single_vote_from_resource_votes_by_identity(Some(votes), &drive_query)
+            .expect("matching poll key should decode")
+            .expect("vote should be present");
+
+        assert_eq!(
+            vote,
+            Vote::ResourceVote(dpp::voting::votes::resource_vote::ResourceVote::default())
+        );
+    }
+
+    #[test]
+    fn vote_identity_vote_rejects_mismatched_returned_poll_key() {
+        let voter_identity_id = Identifier::new([0x11; 32]);
+        let requested_vote_poll_id = Identifier::new([0x22; 32]);
+        let returned_vote_poll_id = Identifier::new([0x33; 32]);
+        let drive_query = single_vote_query_scope(voter_identity_id, requested_vote_poll_id);
+
+        let mut votes = ResourceVotesByIdentity::new();
+        votes.insert(
+            returned_vote_poll_id,
+            Some(dpp::voting::votes::resource_vote::ResourceVote::default()),
+        );
+
+        let err = single_vote_from_resource_votes_by_identity(Some(votes), &drive_query)
+            .expect_err("mismatched poll key should fail");
+
+        match err {
+            Error::ResponseDecodeError { error } => {
+                assert!(
+                    error.contains("expected vote for vote poll"),
+                    "got: {error}"
+                );
+                assert!(
+                    error.contains(&format!("{requested_vote_poll_id}")),
+                    "got: {error}"
+                );
+                assert!(
+                    error.contains(&format!("{returned_vote_poll_id}")),
+                    "got: {error}"
+                );
+            }
+            err => panic!("expected ResponseDecodeError, got: {err:?}"),
+        }
+    }
+
+    #[test]
+    fn vote_identity_vote_returns_none_for_empty_result() {
+        let voter_identity_id = Identifier::new([0x11; 32]);
+        let requested_vote_poll_id = Identifier::new([0x22; 32]);
+        let drive_query = single_vote_query_scope(voter_identity_id, requested_vote_poll_id);
+
+        let vote = single_vote_from_resource_votes_by_identity(None, &drive_query)
+            .expect("empty proof result should decode");
+
+        assert!(vote.is_none());
+    }
+
+    fn single_vote_query_scope(
+        voter_identity_id: Identifier,
+        requested_vote_poll_id: Identifier,
+    ) -> ContestedResourceVotesGivenByIdentityQuery {
+        use dapi_grpc::platform::v0::get_contested_resource_identity_votes_request::{
+            get_contested_resource_identity_votes_request_v0::StartAtVotePollIdInfo,
+            GetContestedResourceIdentityVotesRequestV0, Version as ReqVersion,
+        };
+
+        assert_ne!(voter_identity_id, requested_vote_poll_id);
+
+        let request = platform::GetContestedResourceIdentityVotesRequest {
+            version: Some(ReqVersion::V0(GetContestedResourceIdentityVotesRequestV0 {
+                identity_id: voter_identity_id.to_vec(),
+                limit: Some(1),
+                offset: None,
+                order_ascending: true,
+                start_at_vote_poll_id_info: Some(StartAtVotePollIdInfo {
+                    start_at_poll_identifier: requested_vote_poll_id.to_vec(),
+                    start_poll_identifier_included: true,
+                }),
+                prove: true,
+            })),
+        };
+
+        let drive_query = ContestedResourceVotesGivenByIdentityQuery::try_from_request(request)
+            .expect("single vote request should decode to Drive query");
+
+        assert_eq!(drive_query.identity_id, voter_identity_id);
+        assert_eq!(
+            drive_query.start_at,
+            Some((requested_vote_poll_id.to_buffer(), true))
+        );
+
+        drive_query
     }
 
     #[test]

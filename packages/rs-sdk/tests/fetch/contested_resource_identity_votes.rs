@@ -1,13 +1,46 @@
 //! Test GetContestedResourceIdentityVotesRequest
 
 use crate::fetch::{common::setup_logs, config::Config};
-use dash_sdk::platform::FetchMany;
+use dash_sdk::platform::{
+    proto::get_contested_resource_identity_votes_request::Version, query::VoteQuery, FetchMany,
+    Query, QuerySettings,
+};
 use dpp::{
     dashcore::{hashes::Hash, ProTxHash},
     identifier::Identifier,
+    version::PlatformVersion,
     voting::votes::resource_vote::ResourceVote,
 };
 use drive::query::contested_resource_votes_given_by_identity_query::ContestedResourceVotesGivenByIdentityQuery;
+use rs_dapi_client::RequestSettings;
+
+#[test]
+fn vote_query_encodes_voter_identity_and_vote_poll_separately() {
+    let voter_identity_id = Identifier::new([0x11; 32]);
+    let vote_poll_id = Identifier::new([0x22; 32]);
+    assert_ne!(voter_identity_id, vote_poll_id);
+
+    let request_settings = RequestSettings::default();
+    let settings = QuerySettings {
+        request_settings: &request_settings,
+        protocol_version: PlatformVersion::latest(),
+        prove: true,
+    };
+
+    let request = VoteQuery::new(voter_identity_id, vote_poll_id)
+        .query(&settings)
+        .expect("vote query should encode");
+
+    let Version::V0(v0) = request.version.expect("version should be set");
+
+    assert_eq!(v0.identity_id, voter_identity_id.to_vec());
+    assert_eq!(v0.limit, Some(1));
+    let start_at = v0
+        .start_at_vote_poll_id_info
+        .expect("vote poll id should be encoded as start_at");
+    assert_eq!(start_at.start_at_poll_identifier, vote_poll_id.to_vec());
+    assert!(start_at.start_poll_identifier_included);
+}
 
 /// When we request votes for a non-existing identity, we should get no votes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
