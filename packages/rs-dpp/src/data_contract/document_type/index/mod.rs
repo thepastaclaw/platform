@@ -19,7 +19,6 @@ use crate::data_contract::document_type::ContestedIndexResolution::MasternodeVot
 #[cfg(feature = "validation")]
 use crate::data_contract::errors::DataContractError::RegexError;
 use platform_value::{Value, ValueMap};
-use rand::distributions::{Alphanumeric, DistString};
 use regex::Regex;
 use std::cmp::Ordering;
 use std::sync::OnceLock;
@@ -405,6 +404,25 @@ pub struct Index {
 }
 
 impl Index {
+    fn derive_unnamed_index_name(index_properties: &[IndexProperty]) -> String {
+        if index_properties.is_empty() {
+            return "index".to_string();
+        }
+
+        let mut name = String::from("index");
+
+        for property in index_properties {
+            name.push('_');
+            name.push_str(&property.name.len().to_string());
+            name.push(':');
+            name.push_str(&property.name);
+            name.push(':');
+            name.push(if property.ascending { 'a' } else { 'd' });
+        }
+
+        name
+    }
+
     /// Check to see if two objects are conflicting
     pub fn objects_are_conflicting(&self, object1: &ValueMap, object2: &ValueMap) -> bool {
         if !self.unique {
@@ -981,8 +999,20 @@ impl TryFrom<&[(Value, Value)]> for Index {
             ));
         }
 
-        // if the index didn't have a name let's make one
-        let name = name.unwrap_or_else(|| Alphanumeric.sample_string(&mut rand::thread_rng(), 24));
+        // If the index didn't have a name, derive one deterministically from
+        // its properties and their directions. Every document meta-schema
+        // (v0/v1/v2) requires `name`, so an unnamed index can only reach this
+        // point when schema validation is skipped (check_tx, legacy fixtures,
+        // client-side parses of contracts that could never register); a random
+        // name here would make two parses of the same contract disagree on the
+        // index name and on the iteration order of the name-keyed indices map.
+        // Two unnamed indexes over identical properties and directions derive
+        // the same name and collapse to one entry in that map, which is the
+        // right outcome for a duplicate index declaration. Use a length-
+        // prefixed encoding instead of joining on a separator: property names
+        // can themselves contain separators when validation is skipped, and a
+        // plain join would make distinct property sequences collide.
+        let name = name.unwrap_or_else(|| Self::derive_unnamed_index_name(&index_properties));
 
         Ok(Index {
             name,
@@ -1547,7 +1577,7 @@ mod tests {
     }
 
     #[test]
-    fn test_index_try_from_without_name_generates_random() {
+    fn test_index_try_from_without_name_derives_deterministic_name() {
         let index_map: Vec<(Value, Value)> = vec![(
             Value::Text("properties".to_string()),
             Value::Array(vec![Value::Map(vec![(
@@ -1556,8 +1586,70 @@ mod tests {
             )])]),
         )];
         let index = Index::try_from(index_map.as_slice()).unwrap();
-        assert!(!index.name.is_empty());
-        assert_eq!(index.name.len(), 24); // Alphanumeric.sample_string with len 24
+        assert_eq!(index.name, "index_6:fieldA:a");
+
+        // Parsing the same definition again must produce the same name
+        let again = Index::try_from(index_map.as_slice()).unwrap();
+        assert_eq!(again.name, index.name);
+    }
+
+    #[test]
+    fn test_index_try_from_without_name_multi_property_directions() {
+        let index_map: Vec<(Value, Value)> = vec![(
+            Value::Text("properties".to_string()),
+            Value::Array(vec![
+                Value::Map(vec![(
+                    Value::Text("ownerId".to_string()),
+                    Value::Text("asc".to_string()),
+                )]),
+                Value::Map(vec![(
+                    Value::Text("createdAt".to_string()),
+                    Value::Text("desc".to_string()),
+                )]),
+            ]),
+        )];
+        let index = Index::try_from(index_map.as_slice()).unwrap();
+        assert_eq!(index.name, "index_7:ownerId:a_9:createdAt:d");
+    }
+
+    #[test]
+    fn test_index_try_from_without_name_empty_properties_falls_back_to_index() {
+        let index_map: Vec<(Value, Value)> =
+            vec![(Value::Text("properties".to_string()), Value::Array(vec![]))];
+        let index = Index::try_from(index_map.as_slice()).unwrap();
+
+        assert_eq!(index.name, "index");
+    }
+
+    #[test]
+    fn test_index_try_from_without_name_separator_containing_names_do_not_collide() {
+        let single_property_index_map: Vec<(Value, Value)> = vec![(
+            Value::Text("properties".to_string()),
+            Value::Array(vec![Value::Map(vec![(
+                Value::Text("ownerId_a".to_string()),
+                Value::Text("asc".to_string()),
+            )])]),
+        )];
+        let multi_property_index_map: Vec<(Value, Value)> = vec![(
+            Value::Text("properties".to_string()),
+            Value::Array(vec![
+                Value::Map(vec![(
+                    Value::Text("ownerId".to_string()),
+                    Value::Text("asc".to_string()),
+                )]),
+                Value::Map(vec![(
+                    Value::Text("a".to_string()),
+                    Value::Text("asc".to_string()),
+                )]),
+            ]),
+        )];
+
+        let single_property_index = Index::try_from(single_property_index_map.as_slice()).unwrap();
+        let multi_property_index = Index::try_from(multi_property_index_map.as_slice()).unwrap();
+
+        assert_eq!(single_property_index.name, "index_9:ownerId_a:a");
+        assert_eq!(multi_property_index.name, "index_7:ownerId:a_1:a:a");
+        assert_ne!(single_property_index.name, multi_property_index.name);
     }
 
     #[test]
