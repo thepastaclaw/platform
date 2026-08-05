@@ -62,13 +62,12 @@ zip32 = { version = "0.2.0", default-features = false, optional = true }
 # Same version as `dash-sdk` so the lockfile resolves a single copy.
 futures = { version = "0.3.30", optional = true }
 
-# NOTE: the OS CSPRNG (`OsRng`) this crate uses for one-time Orchard key
-# generation (`shielded::keys::generate_one_time_orchard_key`, the inviter
-# side of L2 shielded invitations) comes from the unconditional `rand = "0.8"`
-# in the "Standard dependencies" block above. dashpay/platform#4277 promoted
-# `rand` from a dev-dependency to a mandatory one, so this PR no longer
-# declares its own optional copy (a second `rand` key in `[dependencies]` is a
-# duplicate-key manifest error) and `shielded` no longer lists `dep:rand`.
+# CSPRNG for this PR's added lib code. `rand`'s `OsRng`/`RngCore` back
+# `shielded::keys::generate_one_time_orchard_key` (behind `shielded`) and
+# `identity::network::encrypted_document` (unconditional). Base v4.2-dev keeps
+# `rand` as a dev-dependency only, so this PR declares its own runtime dependency
+# here rather than in the "Standard dependencies" block that base edited out.
+rand = "0.8"
 
 # Networked, opt-in example binaries. Each one performs real network I/O
 # against a live devnet, so they are examples (compiled, never run by
