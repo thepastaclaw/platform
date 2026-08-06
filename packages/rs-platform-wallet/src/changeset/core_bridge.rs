@@ -1112,6 +1112,7 @@ mod tests {
         synced_height: Option<u32>,
         last_processed_height: Option<u32>,
         n_records: usize,
+        n_instant_locks: usize,
         rejected: bool,
     }
 
@@ -1149,6 +1150,9 @@ mod tests {
                 synced_height: core.and_then(|c| c.synced_height),
                 last_processed_height: core.and_then(|c| c.last_processed_height),
                 n_records: core.map(|c| c.records.len()).unwrap_or(0),
+                n_instant_locks: core
+                    .map(|c| c.instant_locks_for_non_final_records.len())
+                    .unwrap_or(0),
                 rejected,
             });
             if rejected {
@@ -1194,6 +1198,20 @@ mod tests {
             balance: WalletCoreBalance::default(),
             account_balances: BTreeMap::new(),
             addresses_derived: vec![],
+        }
+    }
+
+    /// A non-watermark event whose projection consults wallet state under a
+    /// manager read lock. Used to deterministically pause the batch drain
+    /// after a `synced_height` has already merged, then provoke a mid-drain
+    /// `TryRecvError::Lagged`.
+    fn instant_lock_event(wallet_id: WalletId, txid_seed: u8) -> WalletEvent {
+        WalletEvent::TransactionInstantLocked {
+            wallet_id,
+            txid: dashcore::Txid::from([txid_seed; 32]),
+            instant_lock: dashcore::ephemerealdata::instant_lock::InstantLock::default(),
+            balance: WalletCoreBalance::default(),
+            account_balances: BTreeMap::new(),
         }
     }
 
@@ -1441,6 +1459,58 @@ mod tests {
         );
     }
 
+    /// (f) A burst larger than the bounded drain limit is split across
+    /// exactly two store rounds: the first drains 512 events, the second
+    /// drains the remainder.
+    #[tokio::test]
+    async fn buffered_events_split_at_batch_limit() {
+        let wallet_id = [12u8; 32];
+        let (tx, rx) = broadcast::channel::<WalletEvent>(1024);
+        for h in 1..=513u32 {
+            tx.send(sync_height_event(wallet_id, h)).unwrap();
+        }
+
+        let (obs_tx, mut obs_rx) = unbounded_channel();
+        let persister = Arc::new(ProbePersister::new(obs_tx));
+        let sync_fault = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(run_wallet_event_adapter(
+            test_manager(),
+            Arc::clone(&persister),
+            rx,
+            Arc::clone(&sync_fault),
+            cancel.clone(),
+        ));
+
+        let first = obs_rx.recv().await.expect("first batch store must arrive");
+        let second = obs_rx.recv().await.expect("second batch store must arrive");
+
+        assert_eq!(first.wallet_id, wallet_id);
+        assert_eq!(
+            first.synced_height,
+            Some(512),
+            "the first round must stop exactly at the bounded drain limit"
+        );
+        assert_eq!(second.wallet_id, wallet_id);
+        assert_eq!(
+            second.synced_height,
+            Some(513),
+            "the second round must persist the remaining watermark"
+        );
+        assert!(
+            !sync_fault.load(Ordering::Relaxed),
+            "splitting a clean burst across rounds must not raise a fault"
+        );
+
+        cancel.cancel();
+        drop(tx);
+        handle.await.unwrap();
+        assert!(
+            obs_rx.try_recv().is_err(),
+            "513 buffered events must produce exactly two store rounds"
+        );
+    }
+
     /// (f) Folding is scoped per wallet: a batch carrying events for two
     /// wallets produces one store each, correctly attributed. Merging
     /// across wallets would mis-persist one wallet's rows under the
@@ -1486,7 +1556,64 @@ mod tests {
         );
     }
 
-    /// (g) SAFETY INVARIANT under folding: once the fault latch is set, a
+    /// (g) A mid-drain `TryRecvError::Lagged` faults the session before the
+    /// partial batch is stored, strips the already-merged `synced_height`,
+    /// and still persists the non-watermark portion of that partial batch.
+    #[tokio::test]
+    async fn mid_drain_lag_faults_before_partial_batch_store() {
+        let wallet_id = [13u8; 32];
+        let manager = test_manager();
+        let manager_write = manager.write().await;
+        let (tx, rx) = broadcast::channel::<WalletEvent>(2);
+        tx.send(sync_height_event(wallet_id, 700)).unwrap();
+        tx.send(instant_lock_event(wallet_id, 0x42)).unwrap();
+
+        let (obs_tx, mut obs_rx) = unbounded_channel();
+        let persister = Arc::new(ProbePersister::new(obs_tx));
+        let sync_fault = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let handle = tokio::spawn(run_wallet_event_adapter(
+            Arc::clone(&manager),
+            Arc::clone(&persister),
+            rx,
+            Arc::clone(&sync_fault),
+            cancel.clone(),
+        ));
+
+        while tx.len() != 0 {
+            tokio::task::yield_now().await;
+        }
+
+        tx.send(sync_height_event(wallet_id, 701)).unwrap();
+        tx.send(sync_height_event(wallet_id, 702)).unwrap();
+        tx.send(sync_height_event(wallet_id, 703)).unwrap();
+
+        drop(manager_write);
+
+        let observed = obs_rx
+            .recv()
+            .await
+            .expect("the partial batch store must arrive after the lag");
+        assert_eq!(observed.wallet_id, wallet_id);
+        assert_eq!(
+            observed.synced_height, None,
+            "the already-merged watermark must be stripped once the lag faults the session"
+        );
+        assert_eq!(
+            observed.n_instant_locks, 1,
+            "the non-watermark instant-lock delta from the partial batch must still persist"
+        );
+        assert!(
+            sync_fault.load(Ordering::Relaxed),
+            "mid-drain lag must latch the global sync fault before store"
+        );
+
+        cancel.cancel();
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    /// (h) SAFETY INVARIANT under folding: once the fault latch is set, a
     /// batch that merges a record-bearing event together with a watermark
     /// event still persists the records but must NOT carry the merged
     /// `synced_height`.
