@@ -433,8 +433,8 @@ sealed class DashSdkError(
             // ErrorSigningKeyUnavailable — the STRUCTURED signer
             // discriminator (dashpay/platform#4060 finding 7): the typed
             // completion code rides the whole Rust round-trip, no message
-            // sniffing involved. (Codes 26-30 are reserved by sibling PRs
-            // #4185 / #4184 — see PlatformWalletFFIResultCode.)
+            // sniffing involved. See the current 26-36 ownership block
+            // above and PlatformWalletFFIResultCode.
             31 -> PlatformWallet.SigningKeyUnavailable(message, cause)
             else ->
                 // @Deprecated fallback — see the code-6 arm; code 31 is the

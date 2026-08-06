@@ -1397,9 +1397,20 @@ pub extern "system" fn Java_org_dashfoundation_dashsdk_ffi_WalletManagerNative_c
             .to_string_lossy()
             .into_owned();
         unsafe { platform_wallet_ffi::core_wallet_free_address(out_txid) };
-        env.new_string(txid)
-            .map(|s| s.into_raw())
-            .unwrap_or(ptr::null_mut())
+        match env.new_string(&txid) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                let _ = env.exception_clear();
+                throw_sdk_exception(
+                    env,
+                    99,
+                    &format!(
+                        "broadcast already succeeded with txid {txid}, but JNI failed to allocate the return string; do NOT resend this payment"
+                    ),
+                );
+                ptr::null_mut()
+            }
+        }
     })
 }
 
