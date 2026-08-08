@@ -33,8 +33,8 @@ client = ["platform"]
 # the crate provides message types and transport-generic client stubs only.
 # Tonic's codegen graph still includes tokio-stream and a minimal Tokio
 # slice, but its hyper/rustls transport stack is not enabled. Native
-# networked consumers enable this explicitly (dash-sdk does so in its
-# default features); the wasm codegen path never emits `connect()`.
+# networked consumers enable this explicitly (rs-dapi-client does so only
+# on native targets); the wasm codegen path never emits `connect()`.
 transport = [
   "tonic/channel",
   "tonic/transport",

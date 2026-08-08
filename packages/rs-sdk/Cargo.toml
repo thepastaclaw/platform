@@ -76,7 +76,6 @@ default = [
   "mocks",
   "offline-testing",
   "dapi-grpc/client",
-  "dapi-grpc/transport",
   "token_reward_explanations",
 ]
 spv-client = [
