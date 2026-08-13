@@ -138,7 +138,7 @@ fn v0_wire_shape_with_forced_v0_platform_version() {
 }
 
 #[test]
-fn v0_rejects_count_star_projection() {
+fn should_reject_count_star_projection_in_v0() {
     let q = build_basic_document_query().with_select(SelectProjection::count_star());
     let err = SdkError::from(
         q.try_into_request_for_version(v0_dispatch_version())
@@ -154,7 +154,7 @@ fn v0_rejects_count_star_projection() {
 }
 
 #[test]
-fn v0_rejects_group_by() {
+fn should_reject_group_by_in_v0() {
     let q = build_basic_document_query().with_group_by("a");
     let err = SdkError::from(
         q.try_into_request_for_version(v0_dispatch_version())
@@ -164,7 +164,7 @@ fn v0_rejects_group_by() {
 }
 
 #[test]
-fn v0_rejects_having() {
+fn should_reject_having_in_v0() {
     use drive::query::{
         HavingAggregate, HavingAggregateFunction, HavingClause, HavingOperator, HavingRightOperand,
     };
