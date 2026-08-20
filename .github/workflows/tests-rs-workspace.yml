@@ -331,6 +331,7 @@ jobs:
             --package drive \
             --package dpp \
             --package drive-abci \
+            --package dash-platform-queries \
             --package dash-sdk \
             --package dash-async \
             --package platform-value \
